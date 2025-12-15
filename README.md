@@ -9,15 +9,18 @@
     8. Documentation
 
 - Organisation :
-    Djamil:
+
+  Djamil:
         - Recherche et sélection des sources de données
         - Extraction automatisée
         - Conteneur(docker)
-    Nafissa:
+
+  Nafissa:
         - Nettoyage & Préparation
         - Construction de la base
         - Chargement des données (L du ETL)
-    Mariam:
+
+  Mariam:
         - Transformation
         - Conception du Modèle Conceptuel (MCD)
         - Création du MPD (Modèle Physique)
