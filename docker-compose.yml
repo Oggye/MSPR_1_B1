@@ -1,0 +1,63 @@
+version: "3.9"
+
+services:
+  front:
+    build: ./deezer-platform/front
+    container_name: service_front
+    ports:
+      - "8081:80"
+    depends_on:
+      - create
+      - read
+    restart: always
+
+  create:
+    build: ./deezer-platform/server/create
+    container_name: service_create
+    ports:
+      - "5001:5000"
+    environment:
+      - DB_HOST=db
+      - DB_USER=user
+      - DB_PASSWORD=1234
+      - DB_NAME=g4
+      - DB_PORT=3306
+    depends_on:
+      - db
+    restart: always
+
+  read:
+    build: ./deezer-platform/server/read
+    container_name: service_read
+    ports:
+      - "5002:5000"
+    environment:
+      - DB_HOST=db
+      - DB_USER=user
+      - DB_PASSWORD=1234
+      - DB_NAME=g4
+      - DB_PORT=3306
+      - JWT_SECRET=supersecretkey
+    depends_on:
+      - db
+    restart: always
+
+  db:
+    image: mysql:8.0
+    container_name: g4_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: g4
+      MYSQL_USER: user
+      MYSQL_PASSWORD: 1234
+    ports:
+      - "3307:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./sql:/docker-entrypoint-initdb.d
+
+volumes:
+  db_data:
+
+
