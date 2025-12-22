@@ -1,0 +1,82 @@
+lien : https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data/rail_tf_traveh?format=TSV&compressed=true
+freq,train,vehicle,mot_nrg,unit,geo\TIME_PERIOD	2013 	2014 	2015 	2016 	2017 	2018 	2019 	2020 	2021 	2022 	2023 	2024 
+A,TOTAL,LOC,DIE,THS_TRKM,AL	443.480 	429.289 	427.230 	199.192 	198.047 	329.840 	275 	69.395 	98.617 	81.250 	94.228 	97.822 
+A,TOTAL,LOC,DIE,THS_TRKM,AT	: 	: 	: 	: 	: 	7654 	5730 	6506 	6442 	: 	4617 	4006.456 
+A,TOTAL,LOC,DIE,THS_TRKM,BA	448 	520 	480 	619 	651 	820 	709 	457 	698 	725 	733 	735 
+A,TOTAL,LOC,DIE,THS_TRKM,BG	6049.700 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 
+
+
+
+
+lien : https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data/rail_tf_passmov?format=TSV&compressed=true
+freq,unit,vehicle,geo\TIME_PERIOD	1970 	1971 	1972 	1973 	1974 	1975 	1976 	1977 	1978 	1979 	1980 	1981 	1982 	1983 	1984 	1985 	1986 	1987 	1988 	1989 	1990 	1991 	1992 	1993 	1994 	1995 	1996 	1997 	1998 	1999 	2000 	2001 	2002 	2003 	2004 	2005 	2006 	2007 	2008 	2009 	2010 	2011 	2012 	2013 	2014 	2015 	2016 	2017 	2018 	2019 	2020 	2021 	2022 	2023 	2024 
+A,THS_TRKM,TOTAL,AL	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	369.860 	291.626 	352.024 	163.336 	106.810 	249.020 	214 	39.007 	66.123 	20.367 	19.124 	25.943 
+A,THS_TRKM,TOTAL,AT	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	75460 	: 	96511 	94111 	93606 	88693 	82912 	86922 	90228 	: 	: 	: 	: 	: 	93903 	94757 	100627 	100448 	104993 	: 	106513 	106585 	105153 	105036 	110121 	111518 	112153 	114784 	113202 	120260 	113388 	123417 	127833 	132065 	138522.866 
+A,THS_TRKM,TOTAL,BA	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	1827 	1806 	1675 	1507 	1528 	2009 	1681 	1023 	1237 	1357 	1329 	1462 
+A,THS_TRKM,TOTAL,BE	: 	: 	: 	: 	: 	: 	: 	: 	: 	70783 	72028 	74523 	73374 	70557 	72561 	72310 	70497 	72107 	71422 	71285 	70695 	71665 	72150 	72329 	72101 	70786 	72377 	72149 	74804 	76844 	77122 	76224 	76850 	77203 	78167 	77496 	78306 	79617 	79662 	80782 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	: 	94083 	94033 	95618 
+
+
+
+lien : https://eu.ftp.opendatasoft.com/sncf/plandata/Export_OpenData_SNCF_GTFS_NewTripId.zip
+fichier telecharger :
+agency.txt :
+agency_id,agency_name,agency_url,agency_timezone,agency_lang
+1187,SNCF VOYAGEURS,http://www.sncf.com,Europe/Paris,fr
+5111,SNCF Voyageurs SA,http://www.sncf.com,Europe/Paris,fr
+5235,SNCF Voyageurs EA,http://www.sncf.com,Europe/Paris,fr
+5270,SNCF Voyageurs LO,http://www.sncf.com,Europe/Paris,fr
+FR:Authority::7A842934-E342-4D4F-AF8D-8B4C404FFBC4:,Conseil Régional Auvergne - Rhône-Alpes,http://www.sncf.com,Europe/Paris,fr
+OCEdefault,OCEdefault,http://www.sncf.com,Europe/Paris,fr
+
+calendar_dates.txt :
+service_id,date,exception_type
+000001,20260501,1
+000001,20260508,1
+000001,20260514,1
+000001,20260523,1
+000002,20251221,1
+000002,20251227,1
+000002,20251228,1
+
+feed_info.txt :
+feed_id,feed_publisher_name,feed_publisher_url,feed_lang,feed_start_date,feed_end_date,feed_version,conv_rev,plan_rev
+0,SNCF,http://www.sncf.com,fr,20251221,20260531,2025-12-21,1.179,1766286558
+
+routes.txt :
+route_id,agency_id,route_short_name,route_long_name,route_desc,route_type,route_url,route_color,route_text_color
+FR:Line::00F2577A-6A87-42E0-95F3-07351E4BC2F6:,1187,P53,Bening - Sarreguemines,,3,,006600,FFFFFF
+FR:Line::00F7208C-CEBC-4521-A792-6EC3ABB65811:,1187,C30,Saint-Étienne - Roanne,,2,,0749FF,FFFFFF
+FR:Line::0128E1D5-9183-4D58-B1CF-F5AA5A64A037:,1187,C6,Marseille - Toulon - Hyeres,,2,,0749FF,FFFFFF
+FR:Line::0202671B-7107-429E-A37B-473C55E0254C:,1187,C8,Montpellier Saint-Roch - Avignon Centre,,2,,0749FF,FFFFFF
+FR:Line::022B77D9-D121-4DCB-B808-FB2F7931866B:,1187,C20,Nantes Cholet Angers Saumur,,2,,0749FF,FFFFFF
+
+stop_times.txt :
+trip_id,arrival_time,departure_time,stop_id,stop_sequence,stop_headsign,pickup_type,drop_off_type,shape_dist_traveled
+OCESN117756F1187_F:TER:FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084::87723197:87713040:10:1112:20260523,09:16:00,09:16:00,StopPoint:OCETrain TER-87723197,0,,0,1,
+OCESN117756F1187_F:TER:FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084::87723197:87713040:10:1112:20260523,09:28:00,09:30:00,StopPoint:OCETrain TER-87721282,1,,0,0,
+OCESN117756F1187_F:TER:FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084::87723197:87713040:10:1112:20260523,09:38:00,09:39:00,StopPoint:OCETrain TER-87721332,2,,0,0,
+OCESN117756F1187_F:TER:FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084::87723197:87713040:10:1112:20260523,09:48:00,09:49:00,StopPoint:OCETrain TER-87721357,3,,0,0,
+OCESN117756F1187_F:TER:FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084::87723197:87713040:10:1112:20260523,10:03:00,10:05:00,StopPoint:OCETrain TER-87725689,4,,0,0,
+
+
+stops.txt :
+stop_id,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,location_type,parent_station
+StopArea:OCE71043075,FIGUERES-VILAFANT,,42.2645810,2.94302800,,,1,
+StopPoint:OCETGV INOUI-71043075,FIGUERES-VILAFANT,,42.2645810,2.94302800,,,0,StopArea:OCE71043075
+StopArea:OCE71718010,Barcelone-Sants,,41.3789610,2.13983400,,,1,
+StopPoint:OCETGV INOUI-71718010,Barcelone-Sants,,41.3789610,2.13983400,,,0,StopArea:OCE71718010
+StopArea:OCE71793000,GIRONA,,41.9793710,2.81695700,,,1,
+StopPoint:OCETGV INOUI-71793000,GIRONA,,41.9793710,2.81695700,,,0,StopArea:OCE71793000
+
+transfers.txt :
+from_stop_id,to_stop_id,transfer_type,min_transfer_time,from_route_id,to_route_id
+
+trips.txt :
+route_id,service_id,trip_id,trip_headsign,direction_id,block_id,shape_id
+FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084:,000001,OCESN117756F1187_F:TER:FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084::87723197:87713040:10:1112:20260523,117756,1,1,
+FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084:,000002,OCESN117758F1187_F:TER:FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084::87723197:87713040:10:1311:20260523,117758,1,2,
+FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084:,000003,OCESN117758F1187_F:TER:FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084::87723197:87713040:10:1311:20251226,117758,1,3,
+FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084:,000004,OCESN117760F1187_F:TER:FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084::87723197:87713040:2:1522:20260510,117760,1,4,
+FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084:,000005,OCESN117760F1187_F:TER:FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084::87723197:87713040:10:1511:20260522,117760,1,5,
+FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084:,000006,OCESN117762F1187_F:TER:FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084::87723197:87713040:10:1711:20260525,117762,1,6,
+
