@@ -2,3 +2,6 @@ node_modules/
 .env
 etl/extract/__pycache__/
 etl/transform/__pycache__/
+data/raw/back_on_track/
+data/raw/eurostat/
+data/raw/gtfs_fr/

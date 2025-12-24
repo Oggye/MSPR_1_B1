@@ -1,33 +1,41 @@
-# MSPR_1_B1/etl/extract/extract_eurostat.py
+# =========================================================
+# etl/extract/extract_eurostat.py
+# =========================================================
 
 import requests
-import os
+import pandas as pd
+import io
+import gzip
+from pathlib import Path
 
-RAW_DIR = "MSPR_1_B1/data/raw/eurostat"
-os.makedirs(RAW_DIR, exist_ok=True)
+RAW_DIR = Path("data/raw/eurostat")
+RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-DATASETS = {
-    "rail_tf_traveh": "rail_train_km.tsv",
-    "rail_tf_passmov": "rail_passenger_km.tsv"
+EUROSTAT_FILES = {
+    "rail_traffic": "https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data/rail_tf_traveh?format=TSV&compressed=true",
+    "rail_passengers": "https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data/rail_tf_passmov?format=TSV&compressed=true",
 }
 
-BASE_URL = "https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data"
-
 def extract_eurostat():
-    for dataset, filename in DATASETS.items():
-        url = f"{BASE_URL}/{dataset}?format=TSV&compressed=true"
-        print(f"📥 Téléchargement Eurostat : {dataset}")
-
+    for name, url in EUROSTAT_FILES.items():
+        print(f"Téléchargement {name}…")
         response = requests.get(url)
         response.raise_for_status()
 
-        path = os.path.join(RAW_DIR, filename)
-        with open(path, "wb") as f:
-            f.write(response.content)
+        # Décompression
+        with gzip.open(io.BytesIO(response.content), 'rt', encoding='utf-8') as f:
+            df = pd.read_csv(f, sep="\t")
 
-        print(f"✅ Sauvegardé : {path}")
+        # Afficher les colonnes pour vérifier
+        print(f"{name} colonnes disponibles :", df.columns.tolist())
 
-    print("📊 Extraction Eurostat terminée")
+        # Filtrage uniquement si la colonne existe
+        if 'unit' in df.columns:
+            df = df[df['unit'] == 'THS_TRKM']
+
+        out_file = RAW_DIR / f"{name}.csv"
+        df.to_csv(out_file, index=False)
+        print(f"{name} extrait et sauvegardé → {out_file}")
 
 if __name__ == "__main__":
     extract_eurostat()

@@ -1,41 +1,35 @@
-# MSPR_1_B1/etl/extract/extract_gtfs_fr.py
+# =========================================================
+# etl/extract/extract_gtfs_fr.py
+# =========================================================
 
 import requests
 import zipfile
 import io
-import os
+from pathlib import Path
 
-GTFS_URL = "https://eu.ftp.opendatasoft.com/sncf/plandata/Export_OpenData_SNCF_GTFS_NewTripId.zip"
-
-RAW_DIR = "MSPR_1_B1/data/raw/gtfs_fr"
-REQUIRED_FILES = {
-    "agency.txt",
+GTFS_FR_URL = "https://eu.ftp.opendatasoft.com/sncf/plandata/Export_OpenData_SNCF_GTFS_NewTripId.zip"
+RAW_DIR = Path("data/raw/gtfs_fr")
+KEEP_FILES = [
     "routes.txt",
     "trips.txt",
     "stop_times.txt",
     "stops.txt",
-    "calendar_dates.txt"
-}
+    "calendar_dates.txt",
+    "agency.txt",
+]
 
-def extract_gtfs():
-    os.makedirs(RAW_DIR, exist_ok=True)
+def extract_gtfs_fr():
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("📥 Téléchargement du GTFS SNCF...")
-    response = requests.get(GTFS_URL)
+    print("Téléchargement du GTFS SNCF…")
+    response = requests.get(GTFS_FR_URL)
     response.raise_for_status()
 
     with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-        for file_name in z.namelist():
-            base_name = os.path.basename(file_name)
+        for file_name in KEEP_FILES:
+            if file_name in z.namelist():
+                z.extract(file_name, RAW_DIR)
 
-            if base_name in REQUIRED_FILES:
-                print(f"✅ Extraction : {base_name}")
-                with z.open(file_name) as source, open(
-                    os.path.join(RAW_DIR, base_name), "wb"
-                ) as target:
-                    target.write(source.read())
-
-    print("🚆 Extraction GTFS terminée")
-
-if __name__ == "__main__":
-    extract_gtfs()
+    print("GTFS France extrait :")
+    for file in RAW_DIR.iterdir():
+        print(" -", file.name)

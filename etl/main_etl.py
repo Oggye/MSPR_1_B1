@@ -3,7 +3,7 @@
 # Pipeline ETL principal – ObRail Europe (MSPR E6.1)
 # =========================================================
 
-from extract.extract_gtfs_fr import extract_gtfs
+from extract.extract_gtfs_fr import extract_gtfs_fr
 from extract.extract_eurostat import extract_eurostat
 from extract.extract_back_on_track_eu import extract_back_on_track
 
@@ -12,7 +12,7 @@ def run_etl():
 
     # -----------------------------
     print("\n[1/3] Extraction GTFS France (SNCF)")
-    extract_gtfs()
+    extract_gtfs_fr()
 
     # -----------------------------
     print("\n[2/3] Extraction Eurostat (trafic et passagers)")
