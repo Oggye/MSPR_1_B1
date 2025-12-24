@@ -38,10 +38,6 @@ service_id,date,exception_type
 000002,20251227,1
 000002,20251228,1
 
-feed_info.txt :
-feed_id,feed_publisher_name,feed_publisher_url,feed_lang,feed_start_date,feed_end_date,feed_version,conv_rev,plan_rev
-0,SNCF,http://www.sncf.com,fr,20251221,20260531,2025-12-21,1.179,1766286558
-
 routes.txt :
 route_id,agency_id,route_short_name,route_long_name,route_desc,route_type,route_url,route_color,route_text_color
 FR:Line::00F2577A-6A87-42E0-95F3-07351E4BC2F6:,1187,P53,Bening - Sarreguemines,,3,,006600,FFFFFF
@@ -68,9 +64,6 @@ StopPoint:OCETGV INOUI-71718010,Barcelone-Sants,,41.3789610,2.13983400,,,0,StopA
 StopArea:OCE71793000,GIRONA,,41.9793710,2.81695700,,,1,
 StopPoint:OCETGV INOUI-71793000,GIRONA,,41.9793710,2.81695700,,,0,StopArea:OCE71793000
 
-transfers.txt :
-from_stop_id,to_stop_id,transfer_type,min_transfer_time,from_route_id,to_route_id
-
 trips.txt :
 route_id,service_id,trip_id,trip_headsign,direction_id,block_id,shape_id
 FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084:,000001,OCESN117756F1187_F:TER:FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084::87723197:87713040:10:1112:20260523,117756,1,1,
@@ -86,6 +79,3 @@ FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084:,000006,OCESN117762F1187_F:TER:FR:
 lien : https://script.google.com/macros/s/AKfycbwY9zNQFq0urCHsTstWRKxLe0SstWrwyY04tSuDIVb_yRCtTs_HDlRARS-5fqltgEZr/exec?table={table}
 tables :
 view_ontd_list        (obligatoire)
-view_ontd_details     ✅ (enrichissement)
-view_ontd_cities      ✅ (géographie)
-view_ontd_map         ⬜ (optionnel – data viz)
