@@ -23,7 +23,7 @@ def run_etl():
     extract_back_on_track()
 
     print("\n✅ EXTRACTION TERMINÉE – Données disponibles dans data/raw/")
-    print("📁 Structure recommandée :")
+    print("Structure :")
     print("""
 data/raw/
 ├── gtfs_fr/
