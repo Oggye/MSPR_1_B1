@@ -6,15 +6,15 @@ data/raw/
 
 
 -Pourquoi ces données :
-GTFS France → horaires, gares, trains de jour
-Back-on-Track → itinéraires des trains de nuit européens
-Eurostat → statistiques trafic/fret par pays et type de train
+GTFS France         →     horaires, gares, trains de jour
+Back-on-Track       →     itinéraires des trains de nuit européens
+Eurostat            →     statistiques trafic/fret par pays et type de train
 Elles couvrent tous les besoins : jour/nuit, micro/macro données, historique européen.
 
 -Comment elles se complètent :
-GTFS + Back-on-Track → réseau complet Europe jour/nuit
-GTFS + Eurostat → micro-données + statistiques
-Back-on-Track + Eurostat → trains de nuit vs trafic global
+GTFS + Back-on-Track          →   réseau complet Europe jour/nuit
+GTFS + Eurostat               →   micro-données + statistiques
+Back-on-Track + Eurostat      →   trains de nuit vs trafic global
 
 -Extrait des données :
 Un extrait de chaque dataset est disponible dans le fichier extrais_dataset.txt, tu peux verifier et directement copier a GPT pour qu'il t'aide
