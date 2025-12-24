@@ -76,6 +76,9 @@ FR:Line::B10C45A0-C32C-4232-85F2-4BB81B810084:,000006,OCESN117762F1187_F:TER:FR:
 
 
 
-lien : https://script.google.com/macros/s/AKfycbwY9zNQFq0urCHsTstWRKxLe0SstWrwyY04tSuDIVb_yRCtTs_HDlRARS-5fqltgEZr/exec?table={table}
-tables :
-view_ontd_list        (obligatoire)
+lien : https://script.google.com/macros/s/AKfycbwY9zNQFq0urCHsTstWRKxLe0SstWrwyY04tSuDIVb_yRCtTs_HDlRARS-5fqltgEZr/exec?table=view_ontd_list
+route_id,night_train,route_long_name,itinerary,itinerary_long,countries,operators,source
+1,ÖBB NJ 40425 + NJ 40468,,#N/A,NJ 40425: Bruxelles-Midi / Brussel-Zuid - Bruxelles-Nord / Brussel-Noord - Liège-Guillemins - Aachen Hbf - Köln Hbf - Bonn-Beuel - Koblenz Hbf - Mainz Hbf - München Ost - Rosenheim - Salzburg Hbf - Linz Hbf - St. Pölten Hbf - Wien Meidling - Wien Hbf<br><br>NJ 40468: Wien Hbf - Wien Meidling - St. Pölten Hbf - Linz Hbf - Salzburg Hbf - Rosenheim - München Ost - Koblenz Hbf - Bonn Hbf - Köln Ehrenfeld - Aachen Hbf - Liège-Guillemins - Bruxelles-Nord / Brussel-Noord - Bruxelles-Midi / Brussel-Zuid,"BE, DE, AT",ÖBB,https://www.nightjet.com/
+2,ÖBB NJ 408 + NJ 409,,Berlin – Zürich,NJ 408: Berlin Hbf - Berlin Südkreuz - Lutherstadt Wittenberg Hbf - Bitterfeld - Leipzig Hbf - Frankfurt (Main) Süd - Mannheim Hbf - Karlsruhe Hbf - Baden-Baden - Offenburg - Freiburg (Breisgau) Hbf - Basel Bad Bf - Basel SBB - Zürich HB<br><br>NJ 409: Zürich HB - Basel SBB - Basel Bad Bf - Freiburg (Breisgau) Hbf - Offenburg - Karlsruhe Hbf - Mannheim Hbf - Frankfurt (Main) Süd - Leipzig Hbf - Halle (Saale) Hbf - Bitterfeld - Lutherstadt Wittenberg Hbf - Berlin Südkreuz - Berlin Hbf,"DE, CH",ÖBB,https://www.nightjet.com/
+3,HŽPP 1820 + 1821,,Split – Zagreb,1820: Split - Knin - Karlovac - Zagreb Gl. K.<br><br>1821: Zagreb Gl. K. - Karlovac - Knin - Split,HR,HŽPP,https://www.hzpp.hr/en/#
+4,ČD EN 40476 + EN 40457,Metropol, – Berlin,EN 40476: Budapest-Nyugati - Vac - Štúrovo - Nové Zámky - Bratislava hl.st. - Kúty - Břeclav - Brno hl.n. - Pardubice hl.n. - Praha hl.n. - Praha-Holešovice - Ústí nad Labem hl.n. - Děčín hl.n. - Bad Schandau - Dresden Hbf - Dresden-Neustadt - Berlin Südkreuz - Berlin Hbf<br><br>EN 40457: Praha hl.n. - Pardubice hl.n. - Brno hl.n. - Břeclav - Bratislava hl.st. - Nové Zámky - Vac - Budapest Nyugati,"HU, CZ",ČD,https://www.cd.cz/en/spojeni-a-jizdenka/
