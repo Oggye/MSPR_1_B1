@@ -11,8 +11,8 @@ RAW_DIR.mkdir(parents=True, exist_ok=True)
 
 # URLs redirigées directement vers le JSON final
 BACK_ON_TRACK_URLS = {
-    "view_ontd_list": "https://script.googleusercontent.com/macros/echo?user_content_key=AehSKLhGoaDOe-baTlQ1N3ADnqatpJDZKNuVRqrBFjCGf2rKxC0IYxysizUMXd85pkHHeq0ygsT1FniDv2KZyiagKwMd9EA_OavD_xILtDsRMYl87W8ii0NZ3pCU6pwlPZ9RRb-kDMF5imu-abvhsMzSveSZJPRoL3vH1TYWUF2c8eCa6WkWOI8r1Cqe6QYZz_cKglKc_V4UiBXLayz6siK-1w27FBkziSEfluHGQe2ZgHNdfO2kfxzyu-5wnKurlI2q66-VLtUVDTJodRQM4ATP-v5vB4XgZp5ykcSDIGfze7CwYp3__yE16vJbEDR2Ow&lib=MCICvOpqIJICUYFjSVlDgThOYJJtpaZp0",
-    "view_ontd_cities": "https://script.googleusercontent.com/macros/echo?user_content_key=AehSKLhetSIXcc2yAo4AR2v34yxvtwWMiDu_HLpnG9TsT77mEckhxKLiVH8OjxrT_aSFP5aGxwtyDY91gD52O7rW6VmRLIVZSkBXFTnzZsnFbvhzJp_DZ3BuoyuE8ZYUuZV7Gy5G65653jLhKJgev-odUjg9gDY3G3jK4braML5sS4Fi6wevYkWglL-X8gFXmGCY54X33qoBWAQ2SvkhubaI0zvJIljRaTRYFCXi80BWRmOI5Pi3egyo-DJ29SVdYpvAI8mTzWZIaamowN1h_jTBSt-EcLgeQ2q7TzTFZ4IZQl2Y-INjT2hTT1rfykXNtA&lib=MCICvOpqIJICUYFjSVlDgThOYJJtpaZp0"
+    "view_ontd_list": "https://raw.githubusercontent.com/Back-on-Track-eu/night-train-data/main/data/latest/view_ontd_list.json",
+    "view_ontd_cities": "https://raw.githubusercontent.com/Back-on-Track-eu/night-train-data/main/data/latest/view_ontd_cities.json",
 }
 
 def extract_back_on_track():
