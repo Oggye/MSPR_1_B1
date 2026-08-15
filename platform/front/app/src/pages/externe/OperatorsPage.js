@@ -1,354 +1,395 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Chart as ChartJS,
   CategoryScale,
-  LinearScale,
-  Title,
-  Tooltip,
+  Chart as ChartJS,
   Legend,
-  ArcElement,
-  RadialLinearScale,
+  LinearScale,
+  LineElement,
   PointElement,
-  LineElement
+  Tooltip,
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
-import { getOperators, getOperatorStats, getTrainsByOperator } from '../../services/api';
+
+import {
+  getOperatorStats,
+  getOperatorTimeline,
+  getOperators,
+  getTrainsByOperatorId,
+} from '../../services/api';
+import { PagePagination } from '../../components/DataPagination';
 
 import './css/OperatorsPage.css';
 
-// Enregistrement des composants Chart.js
 ChartJS.register(
   CategoryScale,
   LinearScale,
-  Title,
+  LineElement,
+  PointElement,
   Tooltip,
   Legend,
-  ArcElement,
-  RadialLinearScale,
-  PointElement,
-  LineElement
 );
 
-export default function OperateurPage() {
+const OPERATOR_PAGE_SIZE = 15;
+const ROUTE_PAGE_SIZE = 25;
+
+const formatNumber = value => Number(value || 0).toLocaleString('fr-FR');
+
+const formatDistance = value => {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0
+    ? `${number.toLocaleString('fr-FR', { maximumFractionDigits: 0 })} km`
+    : 'N/A';
+};
+
+const formatDuration = value => {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes) || minutes <= 0) return 'N/A';
+
+  const hours = Math.floor(minutes / 60);
+  const rest = Math.round(minutes % 60);
+  return `${hours} h ${String(rest).padStart(2, '0')} min`;
+};
+
+export default function OperatorsPage() {
   const [operators, setOperators] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [operatorPage, setOperatorPage] = useState(1);
+
   const [selectedOperator, setSelectedOperator] = useState(null);
   const [operatorDetails, setOperatorDetails] = useState(null);
-  const [operatorTrains, setOperatorTrains] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [timeline, setTimeline] = useState([]);
 
-  // Charger la liste des opérateurs au démarrage
+  const [routePage, setRoutePage] = useState(1);
+  const [operatorTrains, setOperatorTrains] = useState([]);
+
+  const [loadingDetails, setLoadingDetails] = useState(false);
+  const [loadingRoutes, setLoadingRoutes] = useState(false);
+  const [error, setError] = useState(null);
+
   useEffect(() => {
-    const fetchOperators = async () => {
-      try {
-        const response = await getOperators();
-        console.log("Opérateurs reçus:", response.data);
-        setOperators(response.data);
-      } catch (error) {
-        console.error("Erreur lors du chargement des opérateurs:", error);
-      }
-    };
-    fetchOperators();
+    getOperators(0, 500)
+      .then(response => setOperators(response.data || []))
+      .catch(err => {
+        console.error(err);
+        setError('Impossible de charger les opérateurs.');
+      });
   }, []);
 
-  // Fonction pour charger les détails d'un opérateur
-  const handleSelectOperator = async (operatorId, operatorName) => {
-    setLoading(true);
-    setSelectedOperator({ id: operatorId, name: operatorName });
-    
+  const filteredOperators = useMemo(
+    () => operators.filter(operator => (
+      operator.operator_name
+        ?.toLowerCase()
+        .includes(searchTerm.toLowerCase())
+    )),
+    [operators, searchTerm],
+  );
+
+  useEffect(() => {
+    setOperatorPage(1);
+  }, [searchTerm]);
+
+  const operatorStart = (operatorPage - 1) * OPERATOR_PAGE_SIZE;
+  const visibleOperators = filteredOperators.slice(
+    operatorStart,
+    operatorStart + OPERATOR_PAGE_SIZE,
+  );
+
+  const loadRoutes = useCallback(async (operatorId, page) => {
+    setLoadingRoutes(true);
+
     try {
-      const statsResponse = await getOperatorStats(operatorId);
-      console.log("Stats opérateur:", statsResponse.data);
-      setOperatorDetails(statsResponse.data);
-      
-      const trainsResponse = await getTrainsByOperator(operatorName);
-      console.log("Trajets opérateur:", trainsResponse.data);
-      setOperatorTrains(trainsResponse.data);
-      
-    } catch (error) {
-      console.error(error);
+      const response = await getTrainsByOperatorId(
+        operatorId,
+        (page - 1) * ROUTE_PAGE_SIZE,
+        ROUTE_PAGE_SIZE,
+      );
+      setOperatorTrains(response.data || []);
+    } catch (err) {
+      console.error(err);
+      setError("Impossible de charger les trajets de l'opérateur.");
     } finally {
-      setLoading(false);
+      setLoadingRoutes(false);
+    }
+  }, []);
+
+  const selectOperator = async operator => {
+    setSelectedOperator(operator);
+    setOperatorDetails(null);
+    setTimeline([]);
+    setOperatorTrains([]);
+    setRoutePage(1);
+    setLoadingDetails(true);
+    setError(null);
+
+    try {
+      const [statsResponse, timelineResponse] = await Promise.all([
+        getOperatorStats(operator.operator_id),
+        getOperatorTimeline(operator.operator_id),
+      ]);
+
+      setOperatorDetails(statsResponse.data);
+      setTimeline(timelineResponse.data || []);
+      await loadRoutes(operator.operator_id, 1);
+    } catch (err) {
+      console.error(err);
+      setError("Impossible de charger les détails de l'opérateur.");
+    } finally {
+      setLoadingDetails(false);
     }
   };
 
-  // Filtrer les opérateurs par recherche
-  const filteredOperators = operators.filter(operator =>
-    operator.operator_name?.toLowerCase().includes(searchTerm.toLowerCase())
+  const changeRoutePage = page => {
+    if (!selectedOperator) return;
+    setRoutePage(page);
+    loadRoutes(selectedOperator.operator_id, page);
+  };
+
+
+  const timeline2010To2024 = useMemo(
+    () => timeline.filter(item => (
+      Number(item.year) >= 2010 && Number(item.year) <= 2024
+    )),
+    [timeline],
   );
 
-  // Formater les nombres
-  const formatNumber = (num) => {
-    return num?.toLocaleString() || 0;
-  };
-
-  const formatDistance = (km) => {
-    if (!km) return "0 km";
-    return `${km.toLocaleString()} km`;
-  };
-
-  const formatDuration = (hours) => {
-    if (!hours) return "N/A";
-    const h = Math.floor(hours);
-    const m = Math.round((hours - h) * 60);
-    return `${h}h${m > 0 ? ` ${m}m` : ''}`;
-  };
-
-  // Préparer les données pour l'évolution temporelle (simulée)
-  const getTimelineData = () => {
-    if (!operatorTrains || operatorTrains.length === 0) return null;
-    
-    // Simuler des données par année basées sur les trajets
-    const years = [2020, 2021, 2022, 2023, 2024];
-    const nightCounts = years.map(() => Math.floor(Math.random() * 50) + 10);
-    const dayCounts = years.map(() => Math.floor(Math.random() * 100) + 20);
-    
-    return {
-      labels: years,
-      datasets: [
-        {
-          label: 'Trains de Nuit',
-          data: nightCounts,
-          borderColor: '#12263a',
-          backgroundColor: 'rgba(18, 38, 58, 0.1)',
-          tension: 0.4,
-          fill: true,
-          pointRadius: 5,
-          pointHoverRadius: 7,
-          pointBackgroundColor: '#12263a',
-        },
-        {
-          label: 'Trains de Jour',
-          data: dayCounts,
-          borderColor: '#1769aa',
-          backgroundColor: 'rgba(23, 105, 170, 0.1)',
-          tension: 0.4,
-          fill: true,
-          pointRadius: 5,
-          pointHoverRadius: 7,
-          pointBackgroundColor: '#1769aa',
-        }
-      ]
-    };
+  const timelineData = {
+    labels: timeline2010To2024.map(item => item.year),
+    datasets: [
+      {
+        label: 'Jour',
+        data: timeline2010To2024.map(item => item.day_trains),
+        borderColor: '#1769aa',
+        backgroundColor: 'rgba(23, 105, 170, 0.12)',
+        tension: 0.3,
+      },
+      {
+        label: 'Nuit',
+        data: timeline2010To2024.map(item => item.night_trains),
+        borderColor: '#7e22ce',
+        backgroundColor: 'rgba(126, 34, 206, 0.12)',
+        tension: 0.3,
+      },
+    ],
   };
 
   const timelineOptions = {
     responsive: true,
     maintainAspectRatio: false,
-    interaction: {
-      mode: 'index',
-      intersect: false,
-    },
-    plugins: {
-      legend: {
-        position: 'top',
-        labels: {
-          usePointStyle: true,
-          padding: 15,
-          font: { size: 11 }
-        }
-      },
-      tooltip: {
-        callbacks: {
-          label: function(context) {
-            return `${context.dataset.label}: ${context.raw} trains`;
-          }
-        }
-      }
-    },
+    interaction: { mode: 'index', intersect: false },
     scales: {
-      y: {
-        title: {
-          display: true,
-          text: 'Nombre de trains',
-          font: { size: 11 }
-        },
-        beginAtZero: true
-      },
-      x: {
-        title: {
-          display: true,
-          text: 'Année',
-          font: { size: 11 }
-        }
-      }
-    }
+      y: { beginAtZero: true, title: { display: true, text: 'Nombre de trajets' } },
+    },
   };
 
-  return (
-    <div className="operators-page">
-      <h1 className="operators-page-title">🚆 Opérateurs Ferroviaires</h1>
+  const syntheticShare = operatorDetails?.total_trains
+    ? (operatorDetails.synthetic_trains / operatorDetails.total_trains) * 100
+    : 0;
 
-      <div className="operators-layout">
-        {/* Colonne gauche - Liste des opérateurs */}
-        <div className="operators-panel">
-          <div className="operators-search">
-            <h3>🔍 Rechercher un opérateur</h3>
+  return (
+    <div className="ob-operators-page">
+      <header className="ob-operators-heading">
+        <span>Analyse par opérateur</span>
+        <h1>Opérateurs ferroviaires</h1>
+        <p>
+          Les listes volumineuses sont paginées. Les graphiques sont calculés
+          depuis des agrégats serveur, sans génération aléatoire côté frontend.
+        </p>
+      </header>
+
+      {error && <div className="ob-operators-alert">{error}</div>}
+
+      <div className="ob-operators-layout">
+        <aside className="ob-operators-panel">
+          <div className="ob-operators-panel__header">
+            <h2>Opérateurs</h2>
             <input
-              type="text"
-              placeholder="Nom de l'opérateur..."
+              type="search"
+              placeholder="Rechercher..."
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={event => setSearchTerm(event.target.value)}
             />
           </div>
 
-          <div className="operators-table-wrapper operators-list-wrapper">
-            <table className="operators-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Nom</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredOperators.map((operator, index) => (
-                  <tr
-                    key={operator.operator_id || index}
-                    className={selectedOperator?.id === operator.operator_id ? 'is-selected' : ''}
-                    onClick={() => handleSelectOperator(operator.operator_id, operator.operator_name)}
-                  >
-                    <td className="muted-cell">{operator.operator_id}</td>
-                    <td className="operator-name-cell">{operator.operator_name}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {filteredOperators.length === 0 && (
-              <div className="operators-empty">
-                Aucun opérateur trouvé
-              </div>
-            )}
+          <div className="ob-operators-list">
+            {visibleOperators.map(operator => (
+              <button
+                type="button"
+                key={operator.operator_id}
+                className={
+                  selectedOperator?.operator_id === operator.operator_id
+                    ? 'is-active'
+                    : ''
+                }
+                onClick={() => selectOperator(operator)}
+              >
+                <span>{operator.operator_name}</span>
+                <small>#{operator.operator_id}</small>
+              </button>
+            ))}
           </div>
-        </div>
 
-        {/* Colonne droite - Détails de l'opérateur sélectionné */}
-        <div>
+          <PagePagination
+            page={operatorPage}
+            total={filteredOperators.length}
+            pageSize={OPERATOR_PAGE_SIZE}
+            onChange={setOperatorPage}
+          />
+        </aside>
+
+        <main className="ob-operator-main">
           {!selectedOperator ? (
-            <div className="operators-state-card">
-              <span className="operators-state-icon">👈</span>
-              <p>Sélectionnez un opérateur dans la liste de gauche</p>
+            <div className="ob-operator-placeholder">
+              Sélectionne un opérateur pour afficher ses indicateurs.
             </div>
-          ) : loading ? (
-            <div className="operators-state-card">
-              <div className="operators-spinner"></div>
-              <p>Chargement des données...</p>
+          ) : loadingDetails && !operatorDetails ? (
+            <div className="ob-operator-placeholder">
+              Chargement des indicateurs...
             </div>
-          ) : (
-            <div>
-              {/* En-tête avec le nom de l'opérateur */}
-              <div className="operator-hero">
-                <h2>{selectedOperator.name}</h2>
-                <p>Opérateur ferroviaire européen</p>
-                {operatorDetails?.countries_served && (
-                  <p className="operator-countries">
-                    🌍 Pays desservis : {operatorDetails.countries_served.join(", ")}
+          ) : operatorDetails ? (
+            <>
+              <section className="ob-operator-hero">
+                <div>
+                  <span>Opérateur</span>
+                  <h2>{operatorDetails.operator_name}</h2>
+                  <p>
+                    {operatorDetails.countries_count} pays desservis :
+                    {' '}
+                    {operatorDetails.countries_served.join(', ')}
                   </p>
-                )}
-              </div>
+                </div>
+                <div className="ob-operator-origin">
+                  <strong>{syntheticShare.toFixed(1)} %</strong>
+                  <span>de données synthétiques</span>
+                </div>
+              </section>
 
-              {/* Cartes KPI */}
-              <div className="operator-kpi-grid">
-                <div className="operator-kpi-card total">
-                  <h4>🚆 TOTAL TRAJETS</h4>
-                  <p>{formatNumber(operatorDetails?.total_trains)}</p>
-                </div>
-                <div className="operator-kpi-card night">
-                  <h4>🌙 TRAJETS DE NUIT</h4>
-                  <p>{formatNumber(operatorDetails?.night_trains)}</p>
-                </div>
-                <div className="operator-kpi-card day">
-                  <h4>☀️ TRAJETS JOUR</h4>
-                  <p>{formatNumber(operatorDetails?.day_trains)}</p>
-                </div>
-              </div>
+              <section className="ob-operator-kpis">
+                <article>
+                  <span>Total trajets</span>
+                  <strong>{formatNumber(operatorDetails.total_trains)}</strong>
+                </article>
+                <article>
+                  <span>Jour / nuit</span>
+                  <strong>
+                    {formatNumber(operatorDetails.day_trains)}
+                    {' / '}
+                    {formatNumber(operatorDetails.night_trains)}
+                  </strong>
+                </article>
+                <article>
+                  <span>Réel / synthétique</span>
+                  <strong>
+                    {formatNumber(operatorDetails.real_trains)}
+                    {' / '}
+                    {formatNumber(operatorDetails.synthetic_trains)}
+                  </strong>
+                </article>
+                <article>
+                  <span>Durée moyenne</span>
+                  <strong>{formatDuration(operatorDetails.duree_moyenne_min)}</strong>
+                </article>
+              </section>
 
-              {/* Évolution temporelle */}
-              {getTimelineData() && (
-                <div className="operators-card">
-                  <h3 className="operators-chart-title">
-                    📈 Évolution du nombre de trains (2020-2024)
-                  </h3>
-                  <div className="operators-chart-box">
-                    <Line data={getTimelineData()} options={timelineOptions} />
+              <section className="ob-operator-card">
+                <div className="ob-operator-card__heading">
+                  <div>
+                    <h3>Évolution annuelle</h3>
+                    <p>Comptages réels du warehouse par année.</p>
                   </div>
                 </div>
-              )}
+                <div className="ob-operator-chart">
+                  {timeline2010To2024.length > 0 ? (
+                    <Line data={timelineData} options={timelineOptions} />
+                  ) : (
+                    <div className="ob-operator-empty">
+                      Pas de série temporelle disponible.
+                    </div>
+                  )}
+                </div>
+              </section>
 
-              {/* Indicateurs de performance */}
-              <div className="operators-card">
-                <h3>📊 INDICATEURS DE PERFORMANCE</h3>
-                <div className="performance-grid">
+              <section className="ob-operator-card">
+                <div className="ob-operator-card__heading">
                   <div>
-                    <div className="performance-label">Distance totale parcourue</div>
-                    <div className="performance-value">
-                      {formatDistance(operatorDetails?.distance_totale_km)}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="performance-label">Durée moyenne des trajets</div>
-                    <div className="performance-value">
-                      {formatDuration(operatorDetails?.duree_moyenne_min / 60)}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="performance-label">Pays desservis</div>
-                    <div className="performance-value">
-                      {operatorDetails?.countries_count || 0}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="performance-label">CO₂ moyen par passager</div>
-                    <div className="performance-value green">
-                      {operatorDetails?.avg_co2_per_passenger?.toFixed(3) || 'N/A'} kg
-                    </div>
+                    <h3>Indicateurs complémentaires</h3>
+                    <p>
+                      Le ratio CO₂ correspond à l'indicateur pays/activité
+                      disponible, pas à une mesure directe de cet opérateur.
+                    </p>
                   </div>
                 </div>
-              </div>
 
-              {/* Liste des trajets */}
-              <div className="operators-card">
-                <h3 className="operators-routes-title">
-                  🚆 LISTE DES TRAJETS {selectedOperator.name}
-                </h3>
-                <div className="operators-table-wrapper routes-table-wrapper">
-                  <table className="operators-table routes-table">
-                    <thead>
-                      <tr>
-                        <th>Pays</th>
-                        <th>Opérateur</th>
-                        <th className="center-cell">Type</th>
-                        <th className="right-cell">Distance</th>
-                        <th className="right-cell">Durée</th>
-                        <th className="center-cell">Année</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {operatorTrains.map((train, index) => (
-                        <tr key={train.fact_id || index}>
-                          <td>{train.country_name} ({train.country_code})</td>
-                          <td>{train.operator_name}</td>
-                          <td className="center-cell">
-                            <span className={`train-type-badge ${train.is_night ? 'is-night' : 'is-day'}`}>
-                              {train.is_night ? '🌙 Nuit' : '☀️ Jour'}
-                            </span>
-                          </td>
-                          <td className="right-cell">{formatDistance(train.distance_km)}</td>
-                          <td className="right-cell">{formatDuration(train.duration_min / 60)}</td>
-                          <td className="center-cell">{train.year}</td>
+                <div className="ob-operator-metrics">
+                  <div>
+                    <span>Distance totale</span>
+                    <strong>{formatDistance(operatorDetails.distance_totale_km)}</strong>
+                  </div>
+                  <div>
+                    <span>Ratio CO₂ / activité voyageurs</span>
+                    <strong>
+                      {operatorDetails.avg_co2_per_passenger != null
+                        ? Number(operatorDetails.avg_co2_per_passenger).toFixed(4)
+                        : 'N/A'}
+                    </strong>
+                  </div>
+                </div>
+              </section>
+
+              <section className="ob-operator-card">
+                <div className="ob-operator-card__heading">
+                  <div>
+                    <h3>Trajets</h3>
+                    <p>{ROUTE_PAGE_SIZE} lignes maximum par requête.</p>
+                  </div>
+                </div>
+
+                {loadingRoutes ? (
+                  <div className="ob-operator-empty">Chargement...</div>
+                ) : (
+                  <div className="ob-operator-table-scroll">
+                    <table className="ob-operator-table">
+                      <thead>
+                        <tr>
+                          <th>Train</th>
+                          <th>Pays</th>
+                          <th>Type</th>
+                          <th>Origine</th>
+                          <th>Distance</th>
+                          <th>Durée</th>
+                          <th>Année</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                {operatorTrains.length === 0 && (
-                  <div className="operators-empty">
-                    Aucun trajet trouvé pour cet opérateur
+                      </thead>
+                      <tbody>
+                        {operatorTrains.map(train => (
+                          <tr key={train.fact_id}>
+                            <td>
+                              <strong>{train.train}</strong>
+                              <small>{train.route_id}</small>
+                            </td>
+                            <td>{train.country_code}</td>
+                            <td>{train.is_night ? 'Nuit' : 'Jour'}</td>
+                            <td>{train.is_synthetic ? 'Synthétique' : 'Réel'}</td>
+                            <td>{formatDistance(train.distance_km)}</td>
+                            <td>{formatDuration(train.duration_min)}</td>
+                            <td>{train.year}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 )}
-              </div>
-            </div>
-          )}
-        </div>
+
+                <PagePagination
+                  page={routePage}
+                  total={operatorDetails.total_trains}
+                  pageSize={ROUTE_PAGE_SIZE}
+                  onChange={changeRoutePage}
+                  disabled={loadingRoutes}
+                />
+              </section>
+            </>
+          ) : null}
+        </main>
       </div>
     </div>
   );
