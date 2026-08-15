@@ -1,126 +1,272 @@
-#==============================================================================
-# Fichier: etl/transform/eurostat.py
-#==============================================================================
+"""
+Transformation Eurostat ferroviaire - version robuste.
 
+Deux niveaux sont produits :
+- *_detailed_processed.csv : toutes les observations nettoyées ;
+- *_processed.csv : métrique canonique pays/année pour le warehouse.
+
+Le parseur lit dynamiquement les dimensions présentes dans la première colonne
+Eurostat (ex. freq,unit,tra_cov,geo\\TIME_PERIOD). Il reste donc compatible avec
+les jeux rail_pa_typepas et rail_tf_traveh sans coder en dur leur structure.
 """
-Transformation des données Eurostat (passagers et trafic)
-"""
-import pandas as pd
-import numpy as np
-from pathlib import Path
+from __future__ import annotations
+
 import logging
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def transform_eurostat(raw_dir: str, processed_dir: str) -> None:
-    """
-    Transforme les données Eurostat
-    """
-    logger.info("📊 Transformation des données Eurostat...")
-    
-    # 1. Passagers ferroviaires
-    passengers_path = Path(raw_dir) / "eurostat" / "rail_passengers.csv"
-    passengers_df = pd.read_csv(passengers_path)
-    
-    # Ce fichier a une structure pivotée - on le transpose
-    if 'freq,unit,vehicle,geo\\TIME_PERIOD' in passengers_df.columns:
-        passengers_df = pd.melt(
-            passengers_df,
-            id_vars=['freq,unit,vehicle,geo\\TIME_PERIOD'],
-            var_name='year',
-            value_name='passengers'
+COUNTRY_NAMES = {
+    'FR':'France','DE':'Germany','CH':'Switzerland','IT':'Italy','ES':'Spain','GB':'United Kingdom',
+    'BE':'Belgium','NL':'Netherlands','AT':'Austria','AL':'Albania','BG':'Bulgaria','CZ':'Czech Republic',
+    'DK':'Denmark','EE':'Estonia','FI':'Finland','GR':'Greece','HR':'Croatia','HU':'Hungary','IE':'Ireland',
+    'IS':'Iceland','LI':'Liechtenstein','LT':'Lithuania','LU':'Luxembourg','LV':'Latvia','ME':'Montenegro',
+    'MK':'North Macedonia','MT':'Malta','NO':'Norway','PL':'Poland','PT':'Portugal','RO':'Romania',
+    'RS':'Serbia','SE':'Sweden','SI':'Slovenia','SK':'Slovakia','TR':'Turkey','CY':'Cyprus',
+    'BA':'Bosnia and Herzegovina','XK':'Kosovo'
+}
+
+
+def _geo(code):
+    value = str(code).strip().upper()
+    return {'UK':'GB', 'EL':'GR'}.get(value, value)
+
+
+def _extract_numeric(series: pd.Series) -> pd.Series:
+    """Gère ':', '123 p', '45.6 e', etc. sans transformer ':' en zéro."""
+    text = series.astype('string').str.strip()
+    number = text.str.extract(r'([-+]?\d+(?:\.\d+)?)', expand=False)
+    return pd.to_numeric(number, errors='coerce')
+
+
+def _dimension_names_from_header(composite_header: str) -> list[str]:
+    """Extrait automatiquement les dimensions avant \\TIME_PERIOD."""
+    left = str(composite_header).split('\\')[0]
+    dims = [part.strip() for part in left.split(',') if part.strip()]
+    if not dims:
+        raise ValueError(f"Impossible de lire les dimensions Eurostat depuis {composite_header!r}")
+    return dims
+
+
+def _wide_to_long(path: Path, value_name: str) -> pd.DataFrame:
+    df = pd.read_csv(path, low_memory=False)
+    df.columns = [str(c).strip() for c in df.columns]
+    if df.empty:
+        return df
+
+    composite = df.columns[0]
+    dimension_names = _dimension_names_from_header(composite)
+
+    long = pd.melt(df, id_vars=[composite], var_name='year', value_name='raw_value')
+    split = long[composite].astype('string').str.split(',', expand=True)
+
+    if split.shape[1] != len(dimension_names):
+        raise ValueError(
+            f"Structure Eurostat inattendue dans {path.name}: {split.shape[1]} dimensions lues, "
+            f"{len(dimension_names)} attendues ({dimension_names})"
         )
-        
-        # Séparer la colonne composite
-        passengers_df[['freq', 'unit', 'vehicle', 'geo']] = passengers_df['freq,unit,vehicle,geo\\TIME_PERIOD'].str.split(',', expand=True)
-        passengers_df = passengers_df.drop(columns=['freq,unit,vehicle,geo\\TIME_PERIOD'])
-    
-    # Nettoyage
-    passengers_df['year'] = pd.to_numeric(passengers_df['year'], errors='coerce')
-    passengers_df['passengers'] = pd.to_numeric(passengers_df['passengers'], errors='coerce')
-    
-    # Garder uniquement après 2010
-    passengers_df = passengers_df[passengers_df['year'] >= 2010]
-    
-    # Remplacer les valeurs manquantes par la moyenne par pays
-    for country in passengers_df['geo'].unique():
-        mask = passengers_df['geo'] == country
-        avg = passengers_df.loc[mask, 'passengers'].mean()
-        passengers_df.loc[mask, 'passengers'] = passengers_df.loc[mask, 'passengers'].fillna(avg)
-    
-    # Ajouter des noms de pays
-    country_names = {
-        'FR': 'France', 'DE': 'Germany', 'CH': 'Switzerland',
-        'IT': 'Italy', 'ES': 'Spain', 'UK': 'United Kingdom',
-        'BE': 'Belgium', 'NL': 'Netherlands', 'AT': 'Austria',
-        'AL': 'Albania', 'BG': 'Bulgaria', 'CZ': 'Czech Republic',
-        'DK': 'Denmark', 'EE': 'Estonia', 'FI': 'Finland',
-        'EL': 'Greece', 'HR': 'Croatia', 'HU': 'Hungary',
-        'IE': 'Ireland', 'IS': 'Iceland', 'LI': 'Liechtenstein',
-        'LT': 'Lithuania', 'LU': 'Luxembourg', 'LV': 'Latvia',
-        'ME': 'Montenegro', 'MK': 'North Macedonia', 'MT': 'Malta',
-        'NO': 'Norway', 'PL': 'Poland', 'PT': 'Portugal',
-        'RO': 'Romania', 'RS': 'Serbia', 'SE': 'Sweden',
-        'SI': 'Slovenia', 'SK': 'Slovakia', 'TR': 'Turkey',
-        'CY': 'Cyprus'
-    }
-    
-    passengers_df['country_name'] = passengers_df['geo'].map(country_names)
-    passengers_df['country_name'] = passengers_df['country_name'].fillna('Unknown')
-    
-    # 2. Trafic ferroviaire
-    traffic_path = Path(raw_dir) / "eurostat" / "rail_traffic.csv"
-    traffic_df = pd.read_csv(traffic_path)
-    
-    # Traiter de la même manière
-    if 'freq,train,vehicle,mot_nrg,unit,geo\\TIME_PERIOD' in traffic_df.columns:
-        traffic_df = pd.melt(
-            traffic_df,
-            id_vars=['freq,train,vehicle,mot_nrg,unit,geo\\TIME_PERIOD'],
-            var_name='year',
-            value_name='traffic'
+
+    split.columns = dimension_names
+    long = pd.concat([long.drop(columns=[composite]), split], axis=1)
+
+    for col in dimension_names:
+        long[col] = long[col].astype('string').str.strip()
+
+    if 'geo' not in long.columns:
+        raise ValueError(f"Dimension geo absente dans {path.name}: {dimension_names}")
+    if 'unit' not in long.columns:
+        raise ValueError(f"Dimension unit absente dans {path.name}: {dimension_names}")
+
+    long['year'] = pd.to_numeric(long['year'].astype('string').str.strip(), errors='coerce')
+    long[value_name] = _extract_numeric(long['raw_value'])
+    long['geo'] = long['geo'].map(_geo)
+
+    long = long[long['year'].notna() & (long['year'] >= 2010)].copy()
+    long['year'] = long['year'].astype(int)
+    long['country_name'] = long['geo'].map(COUNTRY_NAMES).fillna(long['geo'])
+    return long
+
+
+def _normalise_pkm(values: pd.Series, unit: pd.Series) -> pd.Series:
+    u = unit.astype('string').str.upper().str.strip()
+    factor = pd.Series(np.nan, index=values.index, dtype=float)
+    factor.loc[u.str.contains(r'(?:MIO|MLN)_PKM', regex=True, na=False)] = 1.0
+    factor.loc[u.str.contains(r'THS_PKM', regex=True, na=False)] = 0.001
+    factor.loc[u.eq('PKM')] = 1e-6
+    return values * factor
+
+
+def _normalise_passengers(values: pd.Series, unit: pd.Series) -> pd.Series:
+    u = unit.astype('string').str.upper().str.strip()
+    factor = pd.Series(np.nan, index=values.index, dtype=float)
+    factor.loc[u.str.contains(r'(?:MIO|MLN)_(?:PAS|PASS)', regex=True, na=False)] = 1.0
+    factor.loc[u.str.contains(r'THS_(?:PAS|PASS)', regex=True, na=False)] = 0.001
+    factor.loc[u.isin(['PAS', 'PASS'])] = 1e-6
+    return values * factor
+
+
+def _filter_annual(df: pd.DataFrame) -> pd.DataFrame:
+    if 'freq' in df.columns:
+        annual = df['freq'].astype('string').str.upper().eq('A')
+        if annual.any():
+            return df[annual].copy()
+    return df.copy()
+
+
+def _prefer_total_dimensions(df: pd.DataFrame, protected: set[str]) -> pd.DataFrame:
+    """
+    Pour les dimensions de ventilation (tra_cov, vehicle, train...), préfère TOTAL
+    lorsqu'il existe, sans jamais filtrer freq/unit/geo/year.
+    """
+    d = df.copy()
+    for col in d.columns:
+        if col in protected:
+            continue
+        if d[col].dtype.name not in ('string', 'object'):
+            continue
+        upper = d[col].astype('string').str.upper().str.strip()
+        if upper.eq('TOTAL').any():
+            d = d[upper.eq('TOTAL')].copy()
+    return d
+
+
+def _interpolate_country_series(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    result = []
+    for _, group in df.groupby('country_code', sort=False):
+        g = group.sort_values('year').copy()
+        observed = g[value_col].notna()
+        g[value_col] = g[value_col].interpolate(method='linear', limit_area='inside')
+        g['data_quality'] = np.where(
+            observed,
+            'observed',
+            np.where(g[value_col].notna(), 'interpolated', 'missing')
         )
-        
-        # Séparer la colonne composite
-        traffic_df[['freq', 'train', 'vehicle', 'mot_nrg', 'unit', 'geo']] = traffic_df['freq,train,vehicle,mot_nrg,unit,geo\\TIME_PERIOD'].str.split(',', expand=True)
-        traffic_df = traffic_df.drop(columns=['freq,train,vehicle,mot_nrg,unit,geo\\TIME_PERIOD'])
-    
-    # Nettoyage
-    traffic_df['year'] = pd.to_numeric(traffic_df['year'], errors='coerce')
-    traffic_df['traffic'] = pd.to_numeric(traffic_df['traffic'], errors='coerce')
-    
-    # Garder uniquement après 2010
-    traffic_df = traffic_df[traffic_df['year'] >= 2010]
-    
-    # Remplacer les valeurs manquantes par la moyenne
-    for country in traffic_df['geo'].unique():
-        mask = traffic_df['geo'] == country
-        avg = traffic_df.loc[mask, 'traffic'].mean()
-        traffic_df.loc[mask, 'traffic'] = traffic_df.loc[mask, 'traffic'].fillna(avg)
-    
-    # Ajouter des noms de pays
-    traffic_df['country_name'] = traffic_df['geo'].map(country_names)
-    traffic_df['country_name'] = traffic_df['country_name'].fillna('Unknown')
-    
-    # Sauvegarder
-    save_dir = Path(processed_dir) / "eurostat"
-    save_dir.mkdir(parents=True, exist_ok=True)
-    
-    passengers_df.to_csv(save_dir / "passengers_processed.csv", index=False)
-    traffic_df.to_csv(save_dir / "traffic_processed.csv", index=False)
-    
-    logger.info(f"✅ Données Eurostat sauvegardées dans {save_dir}")
-    
-    # Rapport qualité
-    quality_report = {
-        'source': 'eurostat',
-        'passengers_records': len(passengers_df),
-        'traffic_records': len(traffic_df),
-        'countries_passengers': passengers_df['geo'].nunique(),
-        'countries_traffic': traffic_df['geo'].nunique(),
-        'years_range_passengers': (int(passengers_df['year'].min()), int(passengers_df['year'].max())),
-        'years_range_traffic': (int(traffic_df['year'].min()), int(traffic_df['year'].max()))
+        result.append(g)
+    return pd.concat(result, ignore_index=True) if result else df
+
+
+def _build_passenger_canonical(detail: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    empty_cols = ['country_code','year','passengers','country_name','passenger_metric','data_quality']
+    if detail.empty:
+        return pd.DataFrame(columns=empty_cols), 'none'
+
+    d = _filter_annual(detail)
+
+    # On choisit d'abord la métrique. Passenger-km est préféré car il mesure
+    # mieux le volume de transport qu'un simple nombre de voyageurs.
+    pkm = _normalise_pkm(d['passengers_raw'], d['unit'])
+    if pkm.notna().any():
+        d = d.loc[pkm.notna()].copy()
+        d['passengers'] = pkm.loc[d.index]
+        metric = 'MIO_PKM'
+    else:
+        passenger_count = _normalise_passengers(d['passengers_raw'], d['unit'])
+        if passenger_count.notna().any():
+            d = d.loc[passenger_count.notna()].copy()
+            d['passengers'] = passenger_count.loc[d.index]
+            metric = 'MIO_PASSENGERS'
+        else:
+            units = sorted(detail['unit'].dropna().astype(str).str.strip().unique().tolist())
+            logger.warning(
+                "Aucune unité passager/pkm exploitable dans rail_passengers.csv. Unités présentes: %s",
+                units[:20],
+            )
+            return pd.DataFrame(columns=empty_cols), 'none'
+
+    # Après sélection de l'unité pertinente, on préfère les agrégats TOTAL
+    # dans les éventuelles dimensions de couverture/type de transport.
+    d = _prefer_total_dimensions(
+        d,
+        protected={'raw_value','year','passengers_raw','passengers','freq','unit','geo','country_name'}
+    )
+
+    d = d[d['passengers'].notna()].copy()
+    canonical = (
+        d.groupby(['geo','year','country_name'], as_index=False)['passengers']
+        .median()
+        .rename(columns={'geo':'country_code'})
+    )
+    canonical['passenger_metric'] = metric
+    canonical = _interpolate_country_series(canonical, 'passengers')
+    return canonical, metric
+
+
+def _build_traffic_canonical(detail: pd.DataFrame) -> pd.DataFrame:
+    empty_cols = ['country_code','year','traffic','country_name','traffic_unit','data_quality']
+    if detail.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    d = _filter_annual(detail)
+    unit = d['unit'].astype('string').str.upper().str.strip()
+    factor = pd.Series(np.nan, index=d.index, dtype=float)
+    factor.loc[unit.eq('THS_TRKM')] = 1.0
+    factor.loc[unit.str.contains(r'(?:MIO|MLN)_TRKM', regex=True, na=False)] = 1000.0
+    factor.loc[unit.eq('TRKM')] = 0.001
+    d['traffic'] = d['traffic_raw'] * factor
+    d = d[d['traffic'].notna()].copy()
+    if d.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    d = _prefer_total_dimensions(
+        d,
+        protected={'raw_value','year','traffic_raw','traffic','freq','unit','geo','country_name'}
+    )
+
+    canonical = (
+        d.groupby(['geo','year','country_name'], as_index=False)['traffic']
+        .median()
+        .rename(columns={'geo':'country_code'})
+    )
+    canonical['traffic_unit'] = 'THS_TRKM'
+    canonical = _interpolate_country_series(canonical, 'traffic')
+    return canonical
+
+
+def transform_eurostat(raw_dir: str, processed_dir: str) -> dict:
+    logger.info("📊 Transformation Eurostat...")
+    raw = Path(raw_dir) / 'eurostat'
+    out = Path(processed_dir) / 'eurostat'
+    out.mkdir(parents=True, exist_ok=True)
+
+    passengers_path = raw / 'rail_passengers.csv'
+    traffic_path = raw / 'rail_traffic.csv'
+    if not passengers_path.exists():
+        raise FileNotFoundError(passengers_path)
+    if not traffic_path.exists():
+        raise FileNotFoundError(traffic_path)
+
+    passengers_detail = _wide_to_long(passengers_path, 'passengers_raw')
+    traffic_detail = _wide_to_long(traffic_path, 'traffic_raw')
+
+    passengers_detail.to_csv(out / 'passengers_detailed_processed.csv', index=False)
+    traffic_detail.to_csv(out / 'traffic_detailed_processed.csv', index=False)
+
+    passengers, metric = _build_passenger_canonical(passengers_detail)
+    traffic = _build_traffic_canonical(traffic_detail)
+    passengers.to_csv(out / 'passengers_processed.csv', index=False)
+    traffic.to_csv(out / 'traffic_processed.csv', index=False)
+
+    report = {
+        'source':'eurostat',
+        'passengers_detailed_records':int(len(passengers_detail)),
+        'traffic_detailed_records':int(len(traffic_detail)),
+        'passengers_records':int(len(passengers)),
+        'traffic_records':int(len(traffic)),
+        'passenger_metric':metric,
+        'countries_passengers':int(passengers['country_code'].nunique()) if not passengers.empty else 0,
+        'countries_traffic':int(traffic['country_code'].nunique()) if not traffic.empty else 0,
+        'passengers_interpolated':int((passengers.get('data_quality') == 'interpolated').sum()) if not passengers.empty else 0,
+        'traffic_interpolated':int((traffic.get('data_quality') == 'interpolated').sum()) if not traffic.empty else 0,
+        'passenger_units_seen': sorted(passengers_detail['unit'].dropna().astype(str).unique().tolist())[:30] if not passengers_detail.empty else [],
     }
-    
-    return quality_report
+    logger.info(
+        "✅ Eurostat : %s lignes détaillées passagers, %s trafic | canonique passagers=%s (%s)",
+        f"{len(passengers_detail):,}", f"{len(traffic_detail):,}", f"{len(passengers):,}", metric,
+    )
+    return report

@@ -1,1765 +1,842 @@
-#==============================================================================
-# Fichier: etl/transform/enrichment.py
-#==============================================================================
+"""
+Enrichissement ObRail Europe - version volumétrique et traçable.
 
+Principes :
+1. Les services GTFS réels sont conservés à la granularité trip.
+2. Back on Track reste la source réelle dédiée aux trains de nuit.
+3. Les pays sans GTFS sont complétés synthétiquement à partir du référentiel
+   donnee_pays.csv et calibrés sur les volumes GTFS réellement observés.
+4. Aucune donnée réelle n'est transformée artificiellement de jour en nuit.
+5. Le champ canonique est `train`; `is_night` porte la nature jour/nuit.
+6. Le warehouse conserve le même nom de table facts_night_trains afin de limiter
+   les régressions, mais le schéma SQL expose `train` et garde un alias legacy
+   `night_train` généré automatiquement pour l'API existante.
+7. Les gros faits sont écrits en streaming/chunks afin de supporter plusieurs
+   millions de lignes sans charger tout le dataset en RAM.
 """
-Enrichissement des données et préparation pour le data warehouse
-Version avec nettoyage amélioré des pays et génération de données manquantes
-"""
-import pandas as pd
-import numpy as np
-from pathlib import Path
+
+from __future__ import annotations
+
+import json
 import logging
-import re
+import math
+import os
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+import pandas as pd
 
 from .dim_stops import build_dim_stops
-from .distance import compute_route_distance
+from .distance import compute_route_distance, haversine, lookup_reference_coord, parse_stops_from_itinerary
 from .duration import compute_night_train_durations
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-RANDOM_SEED = 42
-SPECIAL_COUNTRY_CODES = {'UNKNOWN', 'OTHER', 'MULTI', 'EU27'}
-INVALID_COUNTRY_NAMES = {'', 'UNKNOWN', 'NAN', 'NONE', 'NULL'}
 COUNTRY_REFERENCE_FILE = Path(__file__).resolve().parent / "donnee_pays.csv"
-MISSING_SYNTHETIC_COUNTRIES = [
-    'AT', 'BE', 'BG', 'CZ', 'DK', 'EE', 'ES', 'FI', 'HR', 'HU', 'IE',
-    'IT', 'LT', 'LV', 'LU', 'NL', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK'
+ANALYSIS_YEARS = list(range(2010, 2025))
+EU27_CODES = [
+    'AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE'
 ]
+SPECIAL_COUNTRIES = {
+    'UNKNOWN':'Unknown Country',
+    'OTHER':'Other European Country',
+    'MULTI':'Multiple Countries',
+    'EU27':'European Union (27)',
+}
+
+# Réglage volontairement paramétrable : le défaut produit déjà une volumétrie
+# importante sans multiplier arbitrairement des dizaines de millions de lignes.
+SYNTHETIC_DENSITY_FACTOR = float(os.getenv('OBRAIL_SYNTHETIC_DENSITY_FACTOR', '0.20'))
+SYNTHETIC_MAX_PER_COUNTRY_YEAR = int(os.getenv('OBRAIL_SYNTHETIC_MAX_PER_COUNTRY_YEAR', '50000'))
+SYNTHETIC_MIN_PER_COUNTRY_YEAR = int(os.getenv('OBRAIL_SYNTHETIC_MIN_PER_COUNTRY_YEAR', '250'))
+FACT_WRITE_CHUNK = int(os.getenv('OBRAIL_FACT_WRITE_CHUNK', '100000'))
+
+OPERATOR_BY_COUNTRY = {
+    'AT':'ÖBB','BE':'SNCB','BG':'BDZ','HR':'HŽ','CZ':'ČD','DK':'DSB','EE':'Elron','FI':'VR','FR':'SNCF',
+    'DE':'DB','GR':'Hellenic Train','HU':'MÁV','IE':'Iarnród Éireann','IT':'Trenitalia','LV':'Vivi','LT':'LTG Link',
+    'LU':'CFL','NL':'NS','PL':'PKP Intercity','PT':'CP','RO':'CFR Călători','SK':'ŽSSK','SI':'Slovenske železnice',
+    'ES':'Renfe','SE':'SJ','CH':'SBB','GB':'National Rail','NO':'Vy',
+}
+
+# Les itinéraires proviennent de la logique synthétique déjà présente dans le
+# projet, élargie seulement pour fournir plusieurs modèles déterministes.
+DAY_ROUTES = {
+    'AT':['Wien - Salzburg','Wien - Innsbruck','Wien - Graz'],
+    'BE':['Brussels - Liège','Brussels - Antwerp','Brussels - Ghent'],
+    'BG':['Sofia - Plovdiv','Sofia - Varna','Sofia - Burgas'],
+    'HR':['Zagreb - Split','Zagreb - Rijeka'],
+    'CZ':['Praha - Brno','Praha - Ostrava','Brno - Ostrava'],
+    'DK':['Copenhagen - Aarhus','Copenhagen - Odense'],
+    'EE':['Tallinn - Tartu','Tallinn - Narva'],
+    'FI':['Helsinki - Tampere','Helsinki - Turku','Helsinki - Oulu'],
+    'FR':['Paris - Lyon','Paris - Marseille','Paris - Lille'],
+    'DE':['Berlin - München','Hamburg - Frankfurt','Köln - Stuttgart'],
+    'GR':['Athens - Thessaloniki'],
+    'HU':['Budapest - Debrecen','Budapest - Szeged','Budapest - Győr'],
+    'IE':['Dublin - Cork','Dublin - Galway','Dublin - Belfast'],
+    'IT':['Roma - Milano','Roma - Napoli','Milano - Venezia'],
+    'LV':['Riga - Daugavpils','Riga - Jelgava'],
+    'LT':['Vilnius - Kaunas','Vilnius - Klaipėda'],
+    'LU':['Luxembourg - Esch-sur-Alzette','Luxembourg - Troisvierges'],
+    'NL':['Amsterdam - Rotterdam','Amsterdam - Utrecht','Amsterdam - Eindhoven'],
+    'PL':['Warszawa - Kraków','Warszawa - Wrocław','Warszawa - Gdańsk'],
+    'PT':['Lisboa - Porto','Lisboa - Coimbra','Porto - Faro'],
+    'RO':['București - Cluj','București - Timișoara','București - Brașov'],
+    'SK':['Bratislava - Košice','Bratislava - Žilina'],
+    'SI':['Ljubljana - Maribor','Ljubljana - Koper'],
+    'ES':['Madrid - Barcelona','Madrid - Valencia','Barcelona - Sevilla'],
+    'SE':['Stockholm - Göteborg','Stockholm - Malmö','Stockholm - Umeå'],
+    'CH':['Zürich - Bern','Zürich - Genève','Basel - Bern'],
+    'GB':['London - Manchester','London - Edinburgh','London - Birmingham'],
+    'NO':['Oslo - Bergen','Oslo - Trondheim'],
+}
+
+NIGHT_ROUTES = {
+    'AT':['Wien - Hamburg','Wien - Zürich'],
+    'BE':['Brussels - Berlin'],
+    'BG':['Sofia - Varna'],
+    'HR':['Zagreb - Split'],
+    'CZ':['Praha - Zürich','Praha - Budapest'],
+    'DK':['Copenhagen - Hamburg','Copenhagen - Berlin'],
+    'EE':['Tallinn - Riga'],
+    'FI':['Helsinki - Rovaniemi'],
+    'FR':['Paris - Briançon','Paris - Nice'],
+    'DE':['Hamburg - Zürich','Berlin - Wien'],
+    'GR':['Athens - Thessaloniki'],
+    'HU':['Budapest - Zürich','Budapest - Split'],
+    'IE':['Dublin - Belfast'],
+    'IT':['Roma - Palermo','Milano - Lecce'],
+    'LV':['Riga - Vilnius'],
+    'LT':['Vilnius - Warsaw'],
+    'LU':['Luxembourg - Berlin'],
+    'NL':['Amsterdam - Berlin','Amsterdam - Wien'],
+    'PL':['Warszawa - Wien','Warszawa - Praha'],
+    'PT':['Lisboa - Madrid'],
+    'RO':['București - Budapest'],
+    'SK':['Bratislava - Košice'],
+    'SI':['Ljubljana - Zagreb','Ljubljana - Wien'],
+    'ES':['Madrid - Lisboa','Barcelona - Paris'],
+    'SE':['Stockholm - Malmö','Stockholm - Berlin'],
+    'CH':['Zürich - Wien','Zürich - Hamburg'],
+    'GB':['London - Edinburgh'],
+    'NO':['Oslo - Trondheim'],
+}
 
 
-def _ratio_0_1(series):
-    """
-    Convertit un indicateur en ratio 0-1.
-    Le referentiel peut contenir soit des pourcentages (80), soit des indices
-    deja normalises (0.80). Cette protection garde la formule defendable sans
-    penaliser les colonnes deja exprimees sous forme d'indice.
-    """
-    values = pd.to_numeric(series, errors='coerce').fillna(0)
-    if values.max() > 1.5:
-        values = values / 100
-    return values.clip(lower=0)
+def _ratio01(series: pd.Series) -> pd.Series:
+    values = pd.to_numeric(series, errors='coerce').fillna(0.0)
+    if len(values) and values.max() > 1.5:
+        values = values / 100.0
+    return values.clip(0, 1)
 
 
-def _max_norm(series):
-    """Normalisation minime et deterministe par le maximum observe."""
-    values = pd.to_numeric(series, errors='coerce').fillna(0)
-    max_value = values.max()
-    if pd.isna(max_value) or max_value <= 0:
-        return values * 0
-    return (values / max_value).clip(lower=0)
+def _max_norm(series: pd.Series) -> pd.Series:
+    values = pd.to_numeric(series, errors='coerce').fillna(0.0)
+    maximum = values.max()
+    return values / maximum if maximum and maximum > 0 else values * 0
 
 
-def load_country_reference_data(path=None):
-    """
-    Charge le referentiel pays utilise pour completer les zones manquantes.
+def load_country_reference() -> pd.DataFrame:
+    ref = pd.read_csv(COUNTRY_REFERENCE_FILE)
+    ref.columns = [str(c).strip() for c in ref.columns]
+    ref['country_code'] = ref['country_code'].astype(str).str.upper().str.strip()
+    ref['country_name'] = ref['country_name'].astype(str).str.strip()
+    numeric = [c for c in ref.columns if c not in ['country_code','country_name']]
+    for col in numeric:
+        ref[col] = pd.to_numeric(ref[col], errors='coerce')
+    if ref['country_code'].duplicated().any():
+        raise ValueError('Doublons dans donnee_pays.csv')
+    if ref[numeric].isna().any().any():
+        missing = ref[numeric].isna().sum()
+        raise ValueError(f"Valeurs numériques manquantes dans donnee_pays.csv: {missing[missing>0].to_dict()}")
 
-    Les controles effectues ici sont volontairement stricts : un doublon pays ou
-    une valeur numerique absente rendrait les calculs de repartition difficiles
-    a justifier devant un jury, donc l'enrichissement echoue explicitement.
-    """
-    ref_path = Path(path) if path is not None else COUNTRY_REFERENCE_FILE
-    country_ref = pd.read_csv(ref_path)
-    country_ref.columns = [str(col).strip() for col in country_ref.columns]
+    ref['rail_score'] = (
+        0.28 * _ratio01(ref['rail_activity_index']) +
+        0.22 * _max_norm(ref['rail_network_km']) +
+        0.13 * _max_norm(ref['population_million']) +
+        0.10 * _ratio01(ref['tourism_index']) +
+        0.09 * _ratio01(ref['urbanization_pct']) +
+        0.08 * _ratio01(ref['electrification_pct']) +
+        0.06 * _max_norm(ref['high_speed_rail_km']) +
+        0.04 * _max_norm(ref['gdp_per_capita_eur'])
+    )
+    return ref
 
-    required_columns = [
-        'country_code', 'country_name', 'population_million',
-        'gdp_billion_eur', 'gdp_per_capita_eur', 'area_km2', 'pop_density',
-        'urbanization_pct', 'rail_network_km', 'high_speed_rail_km',
-        'electrification_pct', 'cars_per_1000', 'tourism_index',
-        'passengers_reference_million', 'rail_activity_index',
-        'night_train_index', 'co2_intensity_index'
+
+def _bool_series(series: pd.Series, default=False) -> pd.Series:
+    if series.dtype == bool:
+        return series.fillna(default)
+    text = series.astype('string').str.lower().str.strip()
+    return text.map({'true':True,'1':True,'yes':True,'false':False,'0':False,'no':False}).fillna(default).astype(bool)
+
+
+def _csv_rows(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with path.open('rb') as handle:
+        count = sum(1 for _ in handle)
+    return max(0, count - 1)
+
+
+def _gtfs_service_files(processed: Path) -> list[tuple[str, Path]]:
+    root = processed / 'gtfs'
+    files = []
+    if root.exists():
+        for country_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+            path = country_dir / 'train_services_processed.csv'
+            if path.exists():
+                files.append((country_dir.name.upper(), path))
+    return files
+
+
+def _collect_unique_column(path: Path, column: str) -> set[str]:
+    values: set[str] = set()
+    try:
+        for chunk in pd.read_csv(path, usecols=[column], chunksize=200_000, low_memory=False):
+            values.update(chunk[column].dropna().astype(str).str.strip())
+    except (ValueError, pd.errors.EmptyDataError):
+        pass
+    return {v for v in values if v}
+
+
+def _collect_years(path: Path) -> set[int]:
+    years = set()
+    try:
+        for chunk in pd.read_csv(path, usecols=['year'], chunksize=200_000, low_memory=False):
+            y = pd.to_numeric(chunk['year'], errors='coerce').dropna().astype(int)
+            years.update(y.tolist())
+    except (ValueError, pd.errors.EmptyDataError):
+        pass
+    return years
+
+
+def _build_dimensions(processed: Path, ref: pd.DataFrame, back: pd.DataFrame):
+    observed_codes = set(ref['country_code'])
+    years = set(ANALYSIS_YEARS)
+    operator_names = set(OPERATOR_BY_COUNTRY.values())
+    observed_counts = {}
+
+    for country, path in _gtfs_service_files(processed):
+        observed_codes.add(country)
+        observed_counts[country] = _csv_rows(path)
+        years.update(_collect_years(path))
+        operator_names.update(_collect_unique_column(path, 'operators'))
+
+    if not back.empty:
+        observed_codes.update(back['country_code'].dropna().astype(str).str.upper())
+        years.update(pd.to_numeric(back['year'], errors='coerce').dropna().astype(int).tolist())
+        operator_names.update(back['operators'].dropna().astype(str).str.strip())
+
+    country_name_map = dict(zip(ref['country_code'], ref['country_name']))
+    country_name_map.update(SPECIAL_COUNTRIES)
+    for code in sorted(observed_codes):
+        country_name_map.setdefault(code, code)
+    dim_countries = pd.DataFrame([
+        {'country_code':code, 'country_name':name}
+        for code, name in country_name_map.items()
+    ]).drop_duplicates('country_code').sort_values('country_code').reset_index(drop=True)
+    dim_countries.insert(0, 'country_id', range(1, len(dim_countries) + 1))
+
+    dim_years = pd.DataFrame({'year':sorted(int(y) for y in years if pd.notna(y))})
+    dim_years.insert(0, 'year_id', range(1, len(dim_years) + 1))
+    dim_years['is_after_2010'] = dim_years['year'] >= 2010
+
+    operator_names = {name for name in operator_names if name and name.lower() not in {'nan','none'}}
+    ordered_ops = ['Unknown Operator'] + sorted(operator_names - {'Unknown Operator'})
+    dim_operators = pd.DataFrame({'operator_id':range(len(ordered_ops)), 'operator_name':ordered_ops})
+    return dim_countries, dim_years, dim_operators, observed_counts
+
+
+def _country_fallback_distance_map(ref: pd.DataFrame) -> dict[str, float]:
+    result = {}
+    for _, row in ref.iterrows():
+        network = float(row['rail_network_km'])
+        if network <= 0:
+            result[row['country_code']] = 0.0
+        else:
+            result[row['country_code']] = float(min(1200, max(35, network * 0.08)))
+    return result
+
+
+def _safe_operator(series: pd.Series, default: str) -> pd.Series:
+    s = series.astype('string').fillna('').str.strip()
+    return s.where(s.ne(''), default)
+
+
+def _prepare_fact_chunk(
+    chunk: pd.DataFrame,
+    fact_start: int,
+    country_ids: dict,
+    year_ids: dict,
+    operator_ids: dict,
+    fallback_distance: dict,
+) -> pd.DataFrame:
+    out = chunk.copy()
+    for col, default in [
+        ('route_id','UNKNOWN_ROUTE'),('train','Train'),('country_code','UNKNOWN'),
+        ('operators','Unknown Operator'),('data_source','unknown')
+    ]:
+        if col not in out.columns:
+            out[col] = default
+    if 'year' not in out.columns:
+        out['year'] = max(ANALYSIS_YEARS)
+    if 'is_night' not in out.columns:
+        out['is_night'] = False
+    if 'is_synthetic' not in out.columns:
+        out['is_synthetic'] = False
+    if 'distance_km' not in out.columns:
+        out['distance_km'] = np.nan
+    if 'duration_min' not in out.columns:
+        out['duration_min'] = np.nan
+
+    out['route_id'] = out['route_id'].astype('string').fillna('UNKNOWN_ROUTE').str.strip().str.slice(0, 150)
+    out['train'] = out['train'].astype('string').fillna('Train').str.strip().str.slice(0, 300)
+    out['country_code'] = out['country_code'].astype('string').str.upper().str.strip().replace({'UK':'GB','EL':'GR'})
+    out['operators'] = _safe_operator(out['operators'], 'Unknown Operator').str.slice(0, 200)
+    out['year'] = pd.to_numeric(out['year'], errors='coerce').fillna(max(ANALYSIS_YEARS)).astype(int)
+    out['is_night'] = _bool_series(out['is_night'], False)
+    out['is_synthetic'] = _bool_series(out['is_synthetic'], False)
+    out['data_source'] = out['data_source'].astype('string').fillna('unknown').str.slice(0, 80)
+
+    out['distance_km'] = pd.to_numeric(out['distance_km'], errors='coerce')
+    missing_distance = out['distance_km'].isna() | (out['distance_km'] <= 0)
+    out.loc[missing_distance, 'distance_km'] = out.loc[missing_distance, 'country_code'].map(fallback_distance).fillna(120.0)
+
+    out['duration_min'] = pd.to_numeric(out['duration_min'], errors='coerce')
+    missing_duration = out['duration_min'].isna() | (out['duration_min'] <= 0)
+    speed = np.where(out['is_night'], 82.0, 100.0)
+    estimated = out['distance_km'] / speed * 60.0
+    out.loc[missing_duration, 'duration_min'] = estimated[missing_duration]
+    minimum_duration = np.where(out['is_night'].to_numpy(), 60.0, 15.0)
+    out['duration_min'] = np.maximum(out['duration_min'].to_numpy(dtype=float), minimum_duration)
+
+    out['country_id'] = out['country_code'].map(country_ids).fillna(country_ids.get('UNKNOWN', 0)).astype(int)
+    # Si une année GTFS récente n'a pas été détectée lors de la construction de dim_years,
+    # on rattache au maximum disponible plutôt que d'échouer.
+    max_year_id = max(year_ids.values())
+    out['year_id'] = out['year'].map(year_ids).fillna(max_year_id).astype(int)
+    out['operator_id'] = out['operators'].map(operator_ids).fillna(0).astype(int)
+    out.insert(0, 'fact_id', np.arange(fact_start, fact_start + len(out), dtype=np.int64))
+
+    cols = [
+        'fact_id','route_id','train','country_id','year_id','operator_id','is_night',
+        'distance_km','duration_min','is_synthetic','data_source'
     ]
-    missing_columns = [col for col in required_columns if col not in country_ref.columns]
-    if missing_columns:
-        raise ValueError(f"Colonnes manquantes dans {ref_path}: {missing_columns}")
-
-    country_ref['country_code'] = country_ref['country_code'].astype(str).str.upper().str.strip()
-    country_ref['country_name'] = country_ref['country_name'].astype(str).str.strip()
-
-    duplicated = country_ref[country_ref.duplicated('country_code', keep=False)]['country_code'].tolist()
-    if duplicated:
-        raise ValueError(f"Doublons country_code dans {ref_path}: {sorted(set(duplicated))}")
-
-    numeric_columns = [col for col in required_columns if col not in ['country_code', 'country_name']]
-    for col in numeric_columns:
-        country_ref[col] = pd.to_numeric(country_ref[col], errors='coerce')
-
-    null_columns = country_ref[required_columns].isna().sum()
-    null_columns = null_columns[null_columns > 0]
-    if not null_columns.empty:
-        raise ValueError(f"Valeurs nulles dans {ref_path}: {null_columns.to_dict()}")
-
-    return country_ref[required_columns].copy()
+    return out[cols]
 
 
-def compute_rail_score(country_ref):
-    """
-    Calcule le score ferroviaire europeen.
-
-    La formule combine la demande potentielle (population), l'offre physique
-    (reseau et grande vitesse), l'usage ferroviaire observe, l'attractivite
-    touristique et l'urbanisation. Chaque composante est normalisee pour eviter
-    qu'une unite brute domine artificiellement le score.
-    """
-    scored = country_ref.copy()
-    population_norm = _max_norm(scored['population_million'])
-    rail_network_norm = _max_norm(scored['rail_network_km'])
-    rail_activity_norm = (pd.to_numeric(scored['rail_activity_index'], errors='coerce').fillna(0) / 100).clip(lower=0)
-    tourism_norm = (pd.to_numeric(scored['tourism_index'], errors='coerce').fillna(0) / 100).clip(lower=0)
-    urbanization_norm = _ratio_0_1(scored['urbanization_pct'])
-    high_speed_norm = _max_norm(scored['high_speed_rail_km'])
-
-    scored['rail_score'] = (
-        0.25 * population_norm
-        + 0.25 * rail_network_norm
-        + 0.20 * rail_activity_norm
-        + 0.10 * tourism_norm
-        + 0.10 * urbanization_norm
-        + 0.10 * high_speed_norm
-    )
-    return scored
+def _append_facts(df: pd.DataFrame, path: Path, first_write: bool) -> bool:
+    if df.empty:
+        return first_write
+    df.to_csv(path, mode='w' if first_write else 'a', header=first_write, index=False)
+    return False
 
 
-def compute_mobility_index(country_ref):
-    """
-    Calcule l'indice de mobilite sur 100.
-
-    L'indice agrege l'intensite d'usage du rail, le tourisme, l'urbanisation,
-    l'electrification, le niveau de richesse et la grande vitesse. Le resultat
-    est renormalise sur 100 pour servir de multiplicateur lisible dans les
-    volumes de trains.
-    """
-    scored = country_ref.copy()
-    gdp_per_capita_norm = _max_norm(scored['gdp_per_capita_eur'])
-    high_speed_norm = _max_norm(scored['high_speed_rail_km'])
-    raw_index = (
-        0.30 * _ratio_0_1(scored['rail_activity_index'])
-        + 0.20 * _ratio_0_1(scored['tourism_index'])
-        + 0.15 * _ratio_0_1(scored['urbanization_pct'])
-        + 0.15 * _ratio_0_1(scored['electrification_pct'])
-        + 0.10 * gdp_per_capita_norm
-        + 0.10 * high_speed_norm
-    )
-    max_index = raw_index.max()
-    scored['mobility_index'] = np.where(max_index > 0, raw_index / max_index * 100, 0)
-    return scored
+def _route_distance(route: str, fallback: float) -> float:
+    stops = parse_stops_from_itinerary(route)
+    if len(stops) >= 2:
+        c1 = lookup_reference_coord(stops[0])
+        c2 = lookup_reference_coord(stops[-1])
+        if c1 and c2:
+            return max(20.0, float(haversine(c1[0], c1[1], c2[0], c2[1])) * 1.18)
+    return max(20.0, float(fallback))
 
 
-def covid_factor(year):
-    """Facteur deterministe mesurant le choc Covid sur la mobilite ferroviaire."""
-    factors = {
-        2020: 0.60,
-        2021: 0.72,
-        2022: 0.88,
-        2023: 0.96,
-        2024: 1.00,
+def _generic_year_factor(year: int) -> float:
+    # Croissance progressive avant 2019, choc Covid, puis reprise.
+    pre = {
+        2010:0.72,2011:0.74,2012:0.76,2013:0.78,2014:0.80,
+        2015:0.83,2016:0.86,2017:0.90,2018:0.94,2019:0.98,
+        2020:0.56,2021:0.67,2022:0.82,2023:0.93,2024:1.00,
     }
-    return factors.get(int(year), 1.00)
+    return pre.get(int(year), 1.0)
 
 
-def compute_night_train_ratio(night_train_index):
-    """
-    Convertit l'indice nuit pays en part realiste de trains de nuit.
-
-    night_train_index exprime une propension relative (Autriche/Suede fortes,
-    Espagne/Pays-Bas faibles), pas un ratio direct de l'offre ferroviaire. Pour
-    garder un reseau europeen majoritairement diurne, l'indice module une plage
-    8%-30%, centree autour de 20% pour les pays a forte tradition de trains de
-    nuit. Les donnees reelles Back On Track deja marquees nuit ne sont jamais
-    remplacees ; ce ratio ne sert qu'a promouvoir une partie des lignes
-    synthetiques en trains de nuit.
-    """
-    index = float(_ratio_0_1(pd.Series([night_train_index])).iloc[0])
-    return min(0.30, max(0.08, 0.08 + 0.22 * index))
-
-
-def prepare_country_reference(path=None):
-    country_ref = load_country_reference_data(path)
-    country_ref = compute_rail_score(country_ref)
-    country_ref = compute_mobility_index(country_ref)
-    return country_ref
-
-
-def build_green_factor_map(emissions, year_list):
-    """
-    Construit green_factor(country, year) = co2_2010 / co2_year.
-
-    Quand Eurostat CO2 fournit une tendance pays, elle prime sur toute tendance
-    fixe : si les emissions diminuent, le facteur augmente et represente un
-    contexte plus favorable au ferroviaire. Si un pays n'a pas de CO2 exploitable,
-    le facteur neutre 1.0 est conserve afin de ne pas inventer une trajectoire.
-    """
+def _traffic_factor_map(traffic: pd.DataFrame) -> dict[tuple[str,int], float]:
     factors = {}
-    if emissions is None or emissions.empty or 'country_code' not in emissions.columns:
+    if traffic.empty or not {'country_code','year','traffic'}.issubset(traffic.columns):
         return factors
-
-    co2 = emissions.copy()
-    co2['year'] = pd.to_numeric(co2['year'], errors='coerce')
-    co2['co2_emissions'] = pd.to_numeric(co2['co2_emissions'], errors='coerce')
-    co2 = co2.dropna(subset=['country_code', 'year', 'co2_emissions'])
-    co2 = co2[co2['co2_emissions'] > 0]
-    if co2.empty:
-        return factors
-
-    yearly = co2.groupby(['country_code', 'year'])['co2_emissions'].mean().reset_index()
-    for country, group in yearly.groupby('country_code'):
-        by_year = dict(zip(group['year'].astype(int), group['co2_emissions']))
-        base = by_year.get(2010)
-        if base is None or base <= 0:
+    t = traffic.copy()
+    t['traffic'] = pd.to_numeric(t['traffic'], errors='coerce')
+    t['year'] = pd.to_numeric(t['year'], errors='coerce')
+    t = t.dropna(subset=['traffic','year'])
+    for country, group in t.groupby('country_code'):
+        group = group.sort_values('year')
+        latest = group['traffic'].dropna()
+        if latest.empty or latest.iloc[-1] <= 0:
             continue
-        for year in year_list:
-            value = by_year.get(int(year))
-            if value is not None and value > 0:
-                factors[(country, int(year))] = float(base / value)
+        base = float(latest.iloc[-1])
+        for _, row in group.iterrows():
+            if row['traffic'] > 0:
+                factors[(str(country), int(row['year']))] = float(np.clip(row['traffic'] / base, 0.25, 1.50))
     return factors
 
 
-def green_factor_for(country, year, green_factors):
-    return float(green_factors.get((country, int(year)), 1.0))
+def _calibrate_synthetic_targets(ref: pd.DataFrame, observed_counts: dict[str,int]) -> dict[str,int]:
+    scored = ref.set_index('country_code')
+    ratios = []
+    for country, count in observed_counts.items():
+        if country in scored.index:
+            score = float(scored.loc[country, 'rail_score'])
+            network = float(scored.loc[country, 'rail_network_km'])
+            if count > 0 and score > 0 and network > 0:
+                ratios.append(count / score)
+    if ratios:
+        # médiane : résistante aux écarts de périmètre entre feeds nationaux.
+        calibration = float(np.median(ratios))
+    else:
+        calibration = 50_000.0
 
-
-def build_country_year_train_targets(country_ref, emissions, year_list, countries, total_trains_per_year):
-    """
-    Repartit les volumes de trains par pays et par an.
-
-    train_volume_index = rail_score * mobility_index * green_factor.
-    Le facteur Covid reduit ensuite le volume annuel 2020-2023 pour refleter le
-    choc exogene applique aux passagers, au trafic et aux trains. Les parts sont
-    calculees par an, sans aleatoire, puis converties en entiers par arrondi
-    deterministe en attribuant les restes aux plus fortes fractions.
-    """
-    ref = country_ref[country_ref['country_code'].isin(countries)].copy()
-    ref = ref[(ref['rail_network_km'] > 0) & (ref['rail_score'] > 0)]
-    green_factors = build_green_factor_map(emissions, year_list)
     targets = {}
-
-    for year in year_list:
-        annual = ref.copy()
-        annual['green_factor'] = annual['country_code'].apply(
-            lambda code: green_factor_for(code, year, green_factors)
-        )
-        annual['train_volume_index'] = (
-            annual['rail_score']
-            * annual['mobility_index']
-            * annual['green_factor']
-        )
-        total_index = annual['train_volume_index'].sum()
-        if total_index <= 0:
+    for _, row in ref.iterrows():
+        code = row['country_code']
+        if row['rail_network_km'] <= 0:
+            targets[code] = 0
             continue
-
-        annual_total = max(1, int(round(total_trains_per_year * covid_factor(year))))
-        annual['raw_target'] = annual['train_volume_index'] / total_index * annual_total
-        annual['target'] = np.floor(annual['raw_target']).astype(int)
-        remainder = annual_total - int(annual['target'].sum())
-        if remainder > 0:
-            annual['fraction'] = annual['raw_target'] - annual['target']
-            annual = annual.sort_values(['fraction', 'train_volume_index', 'country_code'], ascending=[False, False, True])
-            annual.loc[annual.head(remainder).index, 'target'] += 1
-
-        for _, row in annual.iterrows():
-            targets[(row['country_code'], int(year))] = int(row['target'])
-
+        raw = calibration * float(row['rail_score']) * SYNTHETIC_DENSITY_FACTOR
+        targets[code] = int(np.clip(round(raw), SYNTHETIC_MIN_PER_COUNTRY_YEAR, SYNTHETIC_MAX_PER_COUNTRY_YEAR))
     return targets
 
 
-def mean_distance_from_reference(country_ref, country):
-    """
-    Distance ferroviaire moyenne = 8% du reseau national, bornee a 50-1200 km.
-    Cette approximation relie les metriques synthetiques a la taille reelle du
-    reseau au lieu d'utiliser une constante identique pour tous les pays.
-    """
-    row = country_ref[country_ref['country_code'] == country]
-    if row.empty:
-        return 50.0
-    distance = float(row['rail_network_km'].iloc[0]) * 0.08
-    return float(min(1200, max(50, distance)))
+def _night_ratio(row: pd.Series) -> float:
+    if float(row['rail_network_km']) <= 0:
+        return 0.0
+    index = float(row['night_train_index'])
+    if index > 1.5:
+        index /= 100.0
+    return float(np.clip(0.03 + 0.12 * index, 0.02, 0.16))
 
 
-def deterministic_select(values, size, replace=False):
-    """Selection stable pour remplacer les tirages aleatoires."""
-    items = sorted({str(value) for value in values if pd.notna(value) and str(value).strip()})
-    if not items or size <= 0:
-        return []
-    if replace:
-        return [items[i % len(items)] for i in range(size)]
-    return items[:min(size, len(items))]
+def _generate_synthetic_chunk(
+    country: str,
+    year: int,
+    n: int,
+    night_ratio: float,
+    operator: str,
+    route_fallback_distance: float,
+    bot_night_routes: list[str] | None = None,
+) -> pd.DataFrame:
+    if n <= 0:
+        return pd.DataFrame()
+    day_routes = DAY_ROUTES.get(country, [f"{country} National Rail Service"])
+    night_routes = bot_night_routes or NIGHT_ROUTES.get(country, day_routes)
+    n_night = int(round(n * night_ratio))
+    n_day = n - n_night
+
+    frames = []
+    if n_day:
+        idx = np.arange(n_day)
+        routes = np.asarray(day_routes, dtype=object)[idx % len(day_routes)]
+        distance_map = {r:_route_distance(r, route_fallback_distance) for r in set(routes)}
+        distances = np.array([distance_map[r] for r in routes], dtype=float)
+        frames.append(pd.DataFrame({
+            'route_id':[f"SYN-{country}-{year}-D-{i+1}" for i in idx],
+            'train':routes,
+            'country_code':country,
+            'year':year,
+            'operators':operator,
+            'is_night':False,
+            'distance_km':distances,
+            'duration_min':np.maximum(20.0, distances / 95.0 * 60.0),
+            'is_synthetic':True,
+            'data_source':'synthetic_reference',
+        }))
+    if n_night:
+        idx = np.arange(n_night)
+        routes = np.asarray(night_routes, dtype=object)[idx % len(night_routes)]
+        distance_map = {r:_route_distance(r, max(route_fallback_distance * 1.5, 120.0)) for r in set(routes)}
+        distances = np.array([distance_map[r] for r in routes], dtype=float)
+        frames.append(pd.DataFrame({
+            'route_id':[f"SYN-{country}-{year}-N-{i+1}" for i in idx],
+            'train':routes,
+            'country_code':country,
+            'year':year,
+            'operators':operator,
+            'is_night':True,
+            'distance_km':distances,
+            'duration_min':np.maximum(90.0, distances / 78.0 * 60.0),
+            'is_synthetic':True,
+            'data_source':'synthetic_reference',
+        }))
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-def deterministic_operator(operator_df, country, fallback):
-    if operator_df is None or operator_df.empty or 'operator_name' not in operator_df.columns:
-        return fallback
-    country = str(country)
-    possible = operator_df[
-        operator_df['operator_name'].astype(str).str.contains(country, case=False, na=False)
-    ].sort_values('operator_name')
-    if possible.empty:
-        return fallback
-    return possible['operator_name'].iloc[0]
+def _latest_by_country(df: pd.DataFrame, value_col: str) -> dict[str,float]:
+    if df.empty or not {'country_code','year',value_col}.issubset(df.columns):
+        return {}
+    d = df.copy()
+    d['year'] = pd.to_numeric(d['year'], errors='coerce')
+    d[value_col] = pd.to_numeric(d[value_col], errors='coerce')
+    d = d.dropna(subset=['year',value_col]).sort_values('year')
+    return d.groupby('country_code')[value_col].last().to_dict()
 
 
-def add_operator_names(operator_df, operator_names):
-    """
-    Ajoute des noms d'operateurs en evitant les doublons et les IDs manquants.
-    """
-    if operator_df is None or operator_df.empty:
-        operator_df = pd.DataFrame(columns=['operator_id', 'operator_name'])
-    else:
-        operator_df = operator_df.copy()
-        if 'operator_name' not in operator_df.columns:
-            operator_df['operator_name'] = pd.Series(dtype='object')
-        if 'operator_id' not in operator_df.columns:
-            operator_df['operator_id'] = pd.NA
-
-    operator_df['operator_name'] = operator_df['operator_name'].astype('string').str.strip()
-    operator_df = operator_df.dropna(subset=['operator_name'])
-    operator_df = operator_df[operator_df['operator_name'] != '']
-    operator_df = operator_df.drop_duplicates(subset=['operator_name'], keep='first').copy()
-
-    operator_df['operator_id'] = pd.to_numeric(operator_df['operator_id'], errors='coerce')
-    valid_ids = operator_df['operator_id'].dropna()
-    next_id = int(valid_ids.max()) + 1 if not valid_ids.empty else 1
-
-    missing_id_mask = operator_df['operator_id'].isna()
-    for idx in operator_df[missing_id_mask].index:
-        operator_df.loc[idx, 'operator_id'] = next_id
-        next_id += 1
-
-    existing_names = set(operator_df['operator_name'].astype(str))
-    if operator_names is not None:
-        names = pd.Series(operator_names, dtype='object').dropna().astype(str).str.strip()
-        for name in names:
-            if name and name not in existing_names:
-                operator_df = pd.concat([
-                    operator_df,
-                    pd.DataFrame([{'operator_id': next_id, 'operator_name': name}])
-                ], ignore_index=True)
-                existing_names.add(name)
-                next_id += 1
-
-    operator_df['operator_id'] = operator_df['operator_id'].astype(int)
-    return operator_df[['operator_id', 'operator_name']]
-
-
-# -----------------------------------------------------------------------------
-# Fonctions d'enrichissement
-# -----------------------------------------------------------------------------
-
-def add_missing_operators(operator_df):
-    """
-    Ajoute les opérateurs nationaux manquants pour les pays de l'UE.
-    """
-    # Liste des opérateurs manquants (nom, pays indicatif)
-    missing_ops = [
-        ('Renfe', 'ES'),
-        ('DSB', 'DK'),
-        ('VR', 'FI'),
-        ('CP', 'PT'),
-        ('Trenitalia', 'IT'),
-        ('SJ', 'SE'),
-        ('NS', 'NL'),
-        ('SNCB', 'BE'),
-        ('CFL', 'LU'),
-        ('CFF', 'CH'),
-        ('MÁV', 'HU'),
-        ('ŽSSK', 'SK'),
-        ('HŽ', 'HR'),
-        ('ŽS', 'RS'),
-        ('BDZ', 'BG'),
-        ('CFR', 'RO'),
-        ('PKP', 'PL'),
-        ('ČD', 'CZ'),
-        ('ÖBB', 'AT'),
-        ('DB', 'DE'),
-        ('SNCF', 'FR'),
-        ('Eurostar', 'INT'),
-        ('Thalys', 'INT'),
-        ('Nightjet', 'AT'),
-        ('RegioJet', 'CZ'),
-        ('Leo Express', 'CZ'),
-        ('SBB', 'CH'),
-        ('FS', 'IT'),
-        ('Trenord', 'IT'),
-        ('TGV', 'FR'),
-        ('ICE', 'DE'),
-        ('InterCity', 'IE'),
-        ('Iarnród Éireann', 'IE'),
-        ('DSB', 'DK'),
-        ('VY', 'NO'),
-        ('SJ Nattåg', 'SE'),
-        ('Snälltåget', 'SE'),
-        ('GA', 'NO'),
-    ]
-
-    operator_df = add_operator_names(operator_df, [])
-    missing_names = [name for name, _country in missing_ops]
-    return add_operator_names(operator_df, missing_names)
-
-
-def generate_night_trains(night_trains, year_list, operator_df):
-    """
-    Génère des données de trains de nuit pour les années et pays manquants.
-    """
-    if night_trains.empty:
-        return night_trains
-
-    augmented = night_trains.copy()
-
-    if 'country_code' not in augmented.columns:
-        logger.warning("Colonne country_code absente : generation historique ignoree.")
-        return augmented
-    
-    if 'fact_id' in augmented.columns:
-        fact_ids = pd.to_numeric(augmented['fact_id'], errors='coerce').dropna()
-        next_fact_id = int(fact_ids.max()) + 1 if not fact_ids.empty else 1
-    else:
-        augmented['fact_id'] = range(1, len(augmented) + 1)
-        next_fact_id = len(augmented) + 1
-
-    max_route_num = 0
-    if not augmented.empty and 'route_id' in augmented.columns:
-        # Extraire les numéros de route – le résultat est un DataFrame à 1 colonne
-        route_nums = augmented['route_id'].astype(str).str.extract(r'(\d+)').astype(float)
-        # utiliser iloc pour obtenir la Series de la première colonne
-        if not route_nums.iloc[:, 0].isna().all():
-            max_route_num = int(route_nums.max().iloc[0])
-    next_route_id = max_route_num + 1
-
-    # Pays de l'UE (codes ISO)
-    eu_codes = ['AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE']
-    # Pays déjà présents dans night_trains (country_code)
-    existing_countries = augmented['country_code'].unique()
-
-    # Routes types par pays (pour les pays manquants)
-    typical_routes = {
-        'CY': [],  # Chypre pas de train de nuit (île)
-        'DK': ['Copenhagen - Hamburg', 'Copenhagen - Berlin'],
-        'EE': ['Tallinn - Riga', 'Tallinn - Moscow'],
-        'ES': ['Madrid - Lisbon', 'Barcelona - Paris', 'Madrid - Porto'],
-        'GR': ['Athens - Thessaloniki'],
-        'IE': ['Dublin - Belfast'],
-        'LV': ['Riga - Moscow', 'Riga - Warsaw'],
-        'LT': ['Vilnius - Warsaw', 'Vilnius - Moscow'],
-        'LU': ['Luxembourg - Brussels', 'Luxembourg - Paris'],
-        'MT': [],
-        'NL': ['Amsterdam - Berlin', 'Amsterdam - Copenhagen', 'Amsterdam - Vienna'],
-        'PT': ['Lisbon - Madrid', 'Porto - Vigo'],
-        'SI': ['Ljubljana - Zagreb', 'Ljubljana - Vienna'],
-    }
-
-    # Pour les pays déjà présents, on utilise leurs routes existantes comme modèles
-    existing_routes_by_country = {}
-    for country in existing_countries:
-        routes = augmented[augmented['country_code'] == country]['night_train'].tolist()
-        if routes:
-            existing_routes_by_country[country] = routes
-
-    # Paramètres de tendance temporelle (nombre de routes par rapport à 2024)
-    year_multiplier = {
-        2010: 0.3, 2011: 0.35, 2012: 0.4, 2013: 0.45, 2014: 0.5,
-        2015: 0.55, 2016: 0.6, 2017: 0.7, 2018: 0.8, 2019: 0.9,
-        2020: 0.5,
-        2021: 0.6, 2022: 0.8, 2023: 0.95, 2024: 1.0
-    }
-
-    # Génération pour tous les pays (existants et manquants)
-    # On ne génère que pour les années < 2024 (car 2024 déjà présent)
-    for country in set(eu_codes + list(existing_countries)):
-        # Pour les pays existants, on prend leurs routes ; pour les manquants, on utilise typical_routes
-        if country in existing_countries:
-            routes = existing_routes_by_country.get(country, [])
-        else:
-            routes = typical_routes.get(country, [])
-        if not routes:
-            continue
-
-        # Pour chaque année historique demandee avant 2024
-        historical_years = sorted({int(year) for year in year_list if int(year) < 2024})
-        for year in historical_years:
-            # On vérifie si une ligne existe déjà pour ce pays et cette année
-            if ((augmented['country_code'] == country) & (augmented['year'] == year)).any():
-                continue
-
-            # Nombre de routes pour cette année
-            n_routes_2024 = len(routes)
-            n_routes_year = max(1, int(round(n_routes_2024 * year_multiplier.get(year, 0.5))))
-            # Sélectionner aléatoirement parmi les routes (avec remise si nécessaire)
-            selected_routes = []
-            if n_routes_year <= n_routes_2024:
-                selected_routes = deterministic_select(routes, n_routes_year, replace=False)
-            else:
-                # On répète les routes
-                full_repeats = n_routes_year // n_routes_2024
-                remainder = n_routes_year % n_routes_2024
-                selected_routes = routes * full_repeats
-                if remainder > 0:
-                    selected_routes.extend(deterministic_select(routes, remainder, replace=False))
-
-            for route_name in selected_routes:
-                # Trouver un opérateur plausible
-                # On cherche dans operator_df un opérateur dont le nom contient le code pays (ou un mot clé)
-                op_name = deterministic_operator(
-                    operator_df,
-                    country,
-                    f"National Railway of {country}"
-                )
-                # Créer une ligne
-                new_row = {
-                    'fact_id': next_fact_id,
-                    'route_id': next_route_id,
-                    'night_train': route_name,
-                    'country_code': country,
-                    'year': year,
-                    'operators': op_name
-                }
-                augmented = pd.concat([augmented, pd.DataFrame([new_row])], ignore_index=True)
-                next_fact_id += 1
-                next_route_id += 1
-
-    logger.info(f"🚂 Trains de nuit générés : {len(augmented) - len(night_trains)} nouvelles lignes")
-    return augmented
-
-
-def extract_day_trains_from_gtfs(processed_dir, operators_df, train_targets=None):
-    """
-    Extrait les trains de jour depuis les GTFS (FR, CH, DE) transformés.
-    Retourne un DataFrame avec les colonnes : night_train, country_code, year, operators, is_night=False
-    """
-    day_trains = pd.DataFrame()
-    annual_targets = {
-        'fr': 220,
-        'de': 260,
-        'ch': 120,
-    }
-    year_multiplier = {
-        2010: 0.70, 2011: 0.73, 2012: 0.76, 2013: 0.79, 2014: 0.82,
-        2015: 0.86, 2016: 0.90, 2017: 0.94, 2018: 0.98, 2019: 1.00,
-        2020: 0.45, 2021: 0.62, 2022: 0.78, 2023: 0.92, 2024: 1.00
-    }
-
-    for country in ['fr', 'ch', 'de']:
-        routes_path = Path(processed_dir) / "gtfs" / country / "routes_processed.csv"
-        trips_path = Path(processed_dir) / "gtfs" / country / "trips_processed.csv"
-        if not routes_path.exists() or not trips_path.exists():
-            continue
-
-        routes = pd.read_csv(routes_path)
-        routes.columns = [str(col).strip().lower() for col in routes.columns]
-
-        if 'is_night_train' in routes.columns:
-            routes = routes[~routes['is_night_train'].fillna(False)]
-
-        if routes.empty or 'route_id' not in routes.columns:
-            continue
-
-        label_cols = [col for col in ['route_long_name', 'route_short_name', 'route_desc'] if col in routes.columns]
-        routes['route_label'] = ''
-        for col in label_cols:
-            value = routes[col].fillna('').astype(str).str.strip()
-            routes['route_label'] = routes['route_label'].mask(routes['route_label'].eq('') & value.ne(''), value)
-        routes['route_label'] = routes['route_label'].mask(
-            routes['route_label'].eq(''),
-            'Route ' + routes['route_id'].astype(str)
-        )
-
-        trip_cols = pd.read_csv(trips_path, nrows=0).columns.str.lower().tolist()
-        usecols = [col for col in ['route_id', 'trip_headsign'] if col in trip_cols]
-        if 'route_id' not in usecols:
-            continue
-        trips = pd.read_csv(trips_path, usecols=usecols, low_memory=False)
-        trips.columns = [str(col).strip().lower() for col in trips.columns]
-        trips = trips.merge(routes[['route_id', 'route_label']], on='route_id', how='inner')
-        if trips.empty:
-            continue
-
-        if 'trip_headsign' in trips.columns:
-            headsign = trips['trip_headsign'].fillna('').astype(str).str.strip()
-            trips['day_label'] = trips['route_label'].astype(str)
-            trips['day_label'] = trips['day_label'].where(headsign.eq(''), trips['route_label'].astype(str) + ' - ' + headsign)
-        else:
-            trips['day_label'] = trips['route_label'].astype(str)
-
-        route_names = (
-            trips.groupby('day_label')
-            .size()
-            .sort_values(ascending=False)
-            .index
-            .tolist()
-        )
-        if not route_names:
-            continue
-
-        years = sorted({year for _country, year in train_targets.keys()}) if train_targets else sorted(year_multiplier)
-        base_target = annual_targets[country]
-        for year in years:
-            if train_targets:
-                nb_routes = int(train_targets.get((country.upper(), int(year)), 0))
-            else:
-                mult = year_multiplier.get(year, 1.0)
-                nb_routes = max(1, int(round(base_target * mult)))
-            if nb_routes <= 0:
-                continue
-            selected = deterministic_select(route_names, nb_routes, replace=True)
-            for name in selected:
-                op_name = deterministic_operator(
-                    operators_df,
-                    country.upper(),
-                    f"National Railway of {country.upper()}"
-                )
-                day_trains = pd.concat([day_trains, pd.DataFrame([{
-                    'night_train': name,
-                    'country_code': country.upper(),
-                    'year': year,
-                    'operators': op_name,
-                    'is_night': False,
-                    'itinerary': name
-                }])], ignore_index=True)
-    return day_trains
-
-
-def generate_synthetic_day_trains(operators_df, year_list, eu_codes, train_targets=None):
-    """
-    Génère des trains de jour synthétiques pour les pays de l'UE non couverts par GTFS.
-    Utilise des routes typiques.
-    """
-    typical_day_routes = {
-        'AT': ['Wien - Salzburg', 'Wien - Innsbruck'],
-        'BE': ['Brussels - Liège', 'Brussels - Antwerp'],
-        'BG': ['Sofia - Plovdiv', 'Sofia - Varna'],
-        'HR': ['Zagreb - Split', 'Zagreb - Rijeka'],
-        'CY': [],  # pas de train
-        'CZ': ['Praha - Brno', 'Praha - Ostrava'],
-        'DK': ['Copenhagen - Aarhus', 'Copenhagen - Odense'],
-        'EE': ['Tallinn - Tartu'],
-        'FI': ['Helsinki - Tampere', 'Helsinki - Turku'],
-        'FR': ['Paris - Lyon', 'Paris - Marseille', 'Paris - Lille'],
-        'DE': ['Berlin - München', 'Hamburg - Frankfurt', 'Köln - Stuttgart'],
-        'GR': ['Athens - Thessaloniki'],
-        'HU': ['Budapest - Debrecen', 'Budapest - Szeged'],
-        'IE': ['Dublin - Cork', 'Dublin - Galway'],
-        'IT': ['Roma - Milano', 'Roma - Napoli', 'Milano - Venezia'],
-        'LV': ['Riga - Daugavpils'],
-        'LT': ['Vilnius - Kaunas'],
-        'LU': ['Luxembourg - Esch-sur-Alzette'],
-        'MT': [],
-        'NL': ['Amsterdam - Rotterdam', 'Amsterdam - Utrecht'],
-        'PL': ['Warszawa - Kraków', 'Warszawa - Wrocław'],
-        'PT': ['Lisboa - Porto', 'Lisboa - Coimbra'],
-        'RO': ['București - Cluj', 'București - Timișoara'],
-        'SK': ['Bratislava - Košice'],
-        'SI': ['Ljubljana - Maribor'],
-        'ES': ['Madrid - Barcelona', 'Madrid - Valencia', 'Barcelona - Sevilla'],
-        'SE': ['Stockholm - Göteborg', 'Stockholm - Malmö'],
-        'GB': ['London - Manchester', 'London - Edinburgh'],
-    }
-    day_trains = pd.DataFrame()
-    year_multiplier = {y: 1.0 for y in year_list}
-    for country in eu_codes:
-        routes = typical_day_routes.get(country, [])
-        if not routes:
-            continue
-        for year in year_list:
-            if train_targets:
-                nb_routes = int(train_targets.get((country, int(year)), 0))
-            else:
-                mult = year_multiplier.get(year, 1.0)
-                nb_routes = max(1, int(round(len(routes) * mult)))
-            if nb_routes <= 0:
-                continue
-            selected = deterministic_select(routes, nb_routes, replace=True)
-            for name in selected:
-                # Opérateur
-                op_name = deterministic_operator(
-                    operators_df,
-                    country,
-                    f"National Railway of {country}"
-                )
-                day_trains = pd.concat([day_trains, pd.DataFrame([{
-                    'night_train': name,
-                    'country_code': country,
-                    'year': year,
-                    'operators': op_name,
-                    'is_night': False
-                }])], ignore_index=True)
-    return day_trains
-
-
-def generate_country_stats_legacy(passengers, emissions, year_list):
-    """
-    Génère des données de passagers et émissions pour les pays manquants.
-    """
-    if passengers.empty or emissions.empty:
-        return passengers, emissions
-
-    # Copie
-    passengers_aug = passengers.copy()
-    emissions_aug = emissions.copy()
-
-    # Pays déjà présents
-    existing_pass = passengers['country_code'].unique()
-    existing_emiss = emissions['country_code'].unique()
-
-    # Pays à ajouter (codes spéciaux ou manquants)
-    missing_countries = ['LI', 'UA', 'EU27', 'OTHER', 'MULTI', 'UNKNOWN']
-
-    # Paramètres de tendance
-    trend = {}
-    base_trend = 1.0
-    for year in year_list:
-        if year < 2020:
-            trend[year] = base_trend * (1 + 0.02) ** (year - 2010)
-        elif year == 2020:
-            trend[year] = trend[2019] * 0.7
-        else:
-            trend[year] = trend[year-1] * 1.05
-
-    # Pour chaque pays manquant, générer des données
-    for country in missing_countries:
-        # Initialiser les références avec des valeurs par défaut
-        ref_pass = None
-        ref_emiss = None
-
-        if country == 'LI':
-            # Utiliser la Suisse comme référence
-            if 'CH' in existing_pass and 'CH' in existing_emiss:
-                ref_pass = passengers[passengers['country_code'] == 'CH'].groupby('year')['passengers'].mean().to_dict()
-                ref_emiss = emissions[emissions['country_code'] == 'CH'].groupby('year')['co2_emissions'].mean().to_dict()
-            else:
-                # Si CH n'existe pas, utiliser la moyenne UE
-                eu_codes = ['AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE']
-                present_eu = [c for c in eu_codes if c in existing_pass]
-                if present_eu:
-                    ref_pass = passengers[passengers['country_code'].isin(present_eu)].groupby('year')['passengers'].mean().to_dict()
-                    ref_emiss = emissions[emissions['country_code'].isin(present_eu)].groupby('year')['co2_emissions'].mean().to_dict()
-        elif country == 'UA':
-            # Utiliser la Pologne comme référence
-            if 'PL' in existing_pass and 'PL' in existing_emiss:
-                ref_pass = passengers[passengers['country_code'] == 'PL'].groupby('year')['passengers'].mean().to_dict()
-                ref_emiss = emissions[emissions['country_code'] == 'PL'].groupby('year')['co2_emissions'].mean().to_dict()
-            else:
-                # Fallback moyenne UE
-                eu_codes = ['AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE']
-                present_eu = [c for c in eu_codes if c in existing_pass]
-                if present_eu:
-                    ref_pass = passengers[passengers['country_code'].isin(present_eu)].groupby('year')['passengers'].mean().to_dict()
-                    ref_emiss = emissions[emissions['country_code'].isin(present_eu)].groupby('year')['co2_emissions'].mean().to_dict()
-        else:
-            # Pour les génériques (EU27, OTHER, MULTI, UNKNOWN), on utilise la moyenne des pays de l'UE présents
-            eu_codes = ['AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE']
-            present_eu = [c for c in eu_codes if c in existing_pass]
-            if present_eu:
-                ref_pass = passengers[passengers['country_code'].isin(present_eu)].groupby('year')['passengers'].mean().to_dict()
-                ref_emiss = emissions[emissions['country_code'].isin(present_eu)].groupby('year')['co2_emissions'].mean().to_dict()
-            else:
-                # Si aucun pays UE présent, on prend une valeur par défaut
-                ref_pass = {year: 1000 for year in year_list}
-                ref_emiss = {year: 100 for year in year_list}
-
-        # Si après tout ça, ref_pass est encore None (cas improbable), on met une valeur par défaut
-        if ref_pass is None:
-            ref_pass = {year: 1000 for year in year_list}
-            ref_emiss = {year: 100 for year in year_list}
-
-        # Facteur d'échelle pour chaque pays
-        scale_factors = {
-            'LI': 0.05,
-            'UA': 1.5,
-            'EU27': 27,
-            'OTHER': 0.5,
-            'MULTI': 1.0,
-            'UNKNOWN': 0.1
-        }
-        scale = scale_factors.get(country, 1.0)
-
-        for year in year_list:
-            # Completer separement passagers et emissions si une seule source existe.
-            pass_exists = ((passengers_aug['country_code'] == country) & (passengers_aug['year'] == year)).any()
-            emiss_exists = ((emissions_aug['country_code'] == country) & (emissions_aug['year'] == year)).any()
-            if pass_exists and emiss_exists:
-                continue
-
-            # Valeur de base pour cette année
-            base_pass = ref_pass.get(year, ref_pass.get(max(ref_pass.keys()), 1000))
-            base_emiss = ref_emiss.get(year, ref_emiss.get(max(ref_emiss.keys()), 100))
-
-            # Appliquer tendance et échelle
-            pass_val = base_pass * trend[year] * scale
-            emiss_val = base_emiss * trend[year] * scale
-
-            # Ajouter aux DataFrames
-            if not pass_exists:
-                new_pass = pd.DataFrame([{
-                    'country_code': country,
-                    'year': year,
-                    'passengers': pass_val,
-                    'country_name': country
-                }])
-                passengers_aug = pd.concat([passengers_aug, new_pass], ignore_index=True)
-
-            if not emiss_exists:
-                new_emiss = pd.DataFrame([{
-                    'country_code': country,
-                    'year': year,
-                    'co2_emissions': emiss_val,
-                    'country_name': country
-                }])
-                emissions_aug = pd.concat([emissions_aug, new_emiss], ignore_index=True)
-
-    logger.info(f"📊 Statistiques pays générées : passagers +{len(passengers_aug)-len(passengers)}, émissions +{len(emissions_aug)-len(emissions)}")
-    return passengers_aug, emissions_aug
-
-
-# -----------------------------------------------------------------------------
-# Enrichissement pays par referentiel statistique
-# -----------------------------------------------------------------------------
-
-def validate_enrichment_consistency(passengers, emissions, year_list, country_ref):
-    """
-    Controle les invariants metier de l'enrichissement synthetique.
-    Ces assertions detectent les erreurs de formule avant la creation des faits.
-    """
-    checks = []
+def _complete_country_stats(ref: pd.DataFrame, passengers: pd.DataFrame, emissions: pd.DataFrame):
+    p_obs = {}
     if not passengers.empty:
-        checks.append(('passagers negatifs', (pd.to_numeric(passengers['passengers'], errors='coerce') < 0).any()))
+        for _, row in passengers.dropna(subset=['country_code','year','passengers']).iterrows():
+            p_obs[(str(row['country_code']), int(row['year']))] = float(row['passengers'])
+    e_obs = {}
     if not emissions.empty:
-        checks.append(('CO2 negatif', (pd.to_numeric(emissions['co2_emissions'], errors='coerce') < 0).any()))
+        for _, row in emissions.dropna(subset=['country_code','year','co2_emissions']).iterrows():
+            e_obs[(str(row['country_code']), int(row['year']))] = float(row['co2_emissions'])
 
-    ratio_columns = ['urbanization_pct', 'electrification_pct', 'tourism_index', 'night_train_index']
-    for col in ratio_columns:
-        if col in country_ref.columns:
-            values = _ratio_0_1(country_ref[col])
-            checks.append((f'ratio {col} superieur a 100%', (values > 1).any()))
+    # Calibrer le référentiel sur l'échelle réellement utilisée par Eurostat.
+    latest_p = _latest_by_country(passengers, 'passengers')
+    p_ratios = []
+    for _, row in ref.iterrows():
+        code = row['country_code']
+        base = float(row['passengers_reference_million'])
+        if code in latest_p and base > 0:
+            p_ratios.append(latest_p[code] / base)
+    p_scale = float(np.median(p_ratios)) if p_ratios else 1.0
 
-    missing_coverage = []
-    required_countries = set(MISSING_SYNTHETIC_COUNTRIES)
-    if not passengers.empty:
-        available = passengers.copy()
-        available['year'] = pd.to_numeric(available['year'], errors='coerce').astype('Int64')
-        for country in required_countries:
-            years = set(available.loc[available['country_code'] == country, 'year'].dropna().astype(int))
-            if not set(year_list).issubset(years):
-                missing_coverage.append(country)
-    checks.append(('pays sans donnees 2010-2024', bool(missing_coverage)))
+    latest_e = _latest_by_country(emissions, 'co2_emissions')
+    e_ratios = []
+    for _, row in ref.iterrows():
+        code = row['country_code']
+        model = float(row['gdp_billion_eur']) * max(float(row['co2_intensity_index']), 0.05)
+        if code in latest_e and model > 0:
+            e_ratios.append(latest_e[code] / model)
+    e_scale = float(np.median(e_ratios)) if e_ratios else 0.1
 
-    failed = [label for label, failed_check in checks if failed_check]
-    if failed:
-        raise ValueError(f"Controle de coherence enrichissement echoue: {failed}")
+    records, quality = [], []
+    for _, row in ref.iterrows():
+        code = row['country_code']
+        for year in ANALYSIS_YEARS:
+            pk = (code, year)
+            if pk in p_obs:
+                passenger_value, passenger_source = p_obs[pk], 'eurostat'
+            else:
+                passenger_value = float(row['passengers_reference_million']) * p_scale * _generic_year_factor(year)
+                if float(row['rail_network_km']) <= 0:
+                    passenger_value = 0.0
+                passenger_source = 'synthetic_reference'
 
+            if pk in e_obs:
+                emission_value, emission_source = e_obs[pk], 'eurostat'
+            else:
+                base_emission = float(row['gdp_billion_eur']) * max(float(row['co2_intensity_index']), 0.05) * e_scale
+                # Les émissions nationales ont plutôt diminué sur la période ;
+                # le facteur inverse la croissance ferroviaire pour rester prudent.
+                emission_factor = {2020:0.90, 2021:0.94, 2022:0.98, 2023:1.00, 2024:1.00}.get(year, 1.18 - (year-2010)*0.012)
+                emission_value = max(0.0, base_emission * emission_factor)
+                emission_source = 'synthetic_reference'
 
-def generate_country_stats(passengers, emissions, year_list, country_ref=None):
-    """
-    Complete passagers et emissions avec des calculs pays deterministes.
-
-    Les observations existantes sont conservees. Les lignes synthetiques ne sont
-    ajoutees que pour les couples pays/annee absents, afin de combler les zones
-    non couvertes par Eurostat sans remplacer la donnee reelle.
-    """
-    if passengers.empty or emissions.empty:
-        return passengers, emissions
-
-    if country_ref is None:
-        country_ref = prepare_country_reference()
-
-    passengers_aug = passengers.copy()
-    emissions_aug = emissions.copy()
-    passengers_aug['year'] = pd.to_numeric(passengers_aug['year'], errors='coerce')
-    emissions_aug['year'] = pd.to_numeric(emissions_aug['year'], errors='coerce')
-    passengers_aug['passengers'] = pd.to_numeric(passengers_aug['passengers'], errors='coerce')
-    emissions_aug['co2_emissions'] = pd.to_numeric(emissions_aug['co2_emissions'], errors='coerce')
-    passengers_aug['passengers'] = passengers_aug['passengers'].clip(lower=0)
-    emissions_aug['co2_emissions'] = emissions_aug['co2_emissions'].clip(lower=0)
-
-    green_factors = build_green_factor_map(emissions_aug, year_list)
-    ref = country_ref.copy()
-
-    # Formule passagers :
-    # population * activite ferroviaire * attractivite touristique *
-    # moindre dependance automobile. Le terme automobile est borne pour garantir
-    # une valeur positive meme dans les pays tres motorises.
-    ref['passengers_estimated'] = (
-        ref['population_million']
-        * _ratio_0_1(ref['rail_activity_index'])
-        * (1 + _ratio_0_1(ref['tourism_index']))
-        * (1 - (ref['cars_per_1000'] / 2000).clip(lower=0, upper=0.95))
-    )
-
-    estimated_mean = ref['passengers_estimated'].replace(0, np.nan).mean()
-    reference_mean = ref['passengers_reference_million'].replace(0, np.nan).mean()
-    calibration = reference_mean / estimated_mean if pd.notna(estimated_mean) and estimated_mean > 0 else 1.0
-    ref['passengers_final'] = ref['passengers_estimated'] * calibration
-
-    # CO2 ferroviaire :
-    # passagers calibres * distance moyenne issue du reseau * intensite CO2.
-    # Une normalisation globale ramene l'ordre de grandeur vers Eurostat.
-    ref['distance_mean_km'] = ref['country_code'].apply(lambda code: mean_distance_from_reference(ref, code))
-    ref['rail_co2_estimated'] = (
-        ref['passengers_final']
-        * ref['distance_mean_km']
-        * ref['co2_intensity_index']
-    )
-    observed_co2_mean = emissions_aug['co2_emissions'].replace(0, np.nan).mean()
-    estimated_co2_mean = ref['rail_co2_estimated'].replace(0, np.nan).mean()
-    co2_scale = observed_co2_mean / estimated_co2_mean if pd.notna(estimated_co2_mean) and estimated_co2_mean > 0 else 1.0
-
-    countries_to_complete = sorted(set(MISSING_SYNTHETIC_COUNTRIES) | set(ref['country_code']))
-    for _, row in ref[ref['country_code'].isin(countries_to_complete)].iterrows():
-        country = row['country_code']
-        for year in year_list:
-            pass_exists = ((passengers_aug['country_code'] == country) & (passengers_aug['year'] == year)).any()
-            emiss_exists = ((emissions_aug['country_code'] == country) & (emissions_aug['year'] == year)).any()
-            if pass_exists and emiss_exists:
-                continue
-
-            green = green_factor_for(country, year, green_factors)
-            annual_passengers = max(0, float(row['passengers_final']) * green * covid_factor(year))
-            annual_emissions = max(0, float(row['rail_co2_estimated']) * co2_scale / max(green, 0.01))
-
-            if not pass_exists:
-                passengers_aug = pd.concat([passengers_aug, pd.DataFrame([{
-                    'country_code': country,
-                    'year': year,
-                    'passengers': annual_passengers,
-                    'country_name': row['country_name']
-                }])], ignore_index=True)
-
-            if not emiss_exists:
-                emissions_aug = pd.concat([emissions_aug, pd.DataFrame([{
-                    'country_code': country,
-                    'year': year,
-                    'co2_emissions': annual_emissions,
-                    'country_name': row['country_name']
-                }])], ignore_index=True)
-
-    validate_enrichment_consistency(passengers_aug, emissions_aug, year_list, ref)
-    logger.info(f"Statistiques pays generees par referentiel : passagers +{len(passengers_aug)-len(passengers)}, emissions +{len(emissions_aug)-len(emissions)}")
-    return passengers_aug, emissions_aug
+            co2_pp = emission_value / passenger_value if passenger_value > 0 else 0.0
+            records.append({
+                'country_code':code,'year':year,'passengers':passenger_value,
+                'co2_emissions':emission_value,'co2_per_passenger':co2_pp,
+            })
+            quality.append({
+                'country_code':code,'year':year,
+                'passengers_source':passenger_source,'co2_source':emission_source,
+            })
+    return pd.DataFrame(records), pd.DataFrame(quality)
 
 
-# -----------------------------------------------------------------------------
-# Fonctions existantes (clean_and_standardize_country_codes, enrich_and_prepare...)
-# -----------------------------------------------------------------------------
-
-def clean_and_standardize_country_codes(df, country_col='country_code'):
-    """
-    Nettoie et standardise les codes pays
-    """
-    if df.empty or country_col not in df.columns:
-        return df
-    
-    df = df.copy()
-    
-    # Mapping des corrections de codes pays
-    country_corrections = {
-        # Standardisation
-        'UK': 'GB',  # United Kingdom
-        'EL': 'GR',  # Greece (code Eurostat)
-        
-        # Codes à 3 lettres vers codes à 2 lettres
-        'GBR': 'GB', 'FRA': 'FR', 'DEU': 'DE', 'ITA': 'IT', 'ESP': 'ES',
-        'NLD': 'NL', 'BEL': 'BE', 'CHE': 'CH', 'AUT': 'AT', 'CZE': 'CZ',
-        'POL': 'PL', 'SWE': 'SE', 'NOR': 'NO', 'DNK': 'DK', 'FIN': 'FI',
-        'PRT': 'PT', 'GRC': 'GR', 'HUN': 'HU', 'ROU': 'RO', 'BGR': 'BG',
-        'SRB': 'RS', 'HRV': 'HR', 'SVN': 'SI', 'SVK': 'SK', 'LTU': 'LT',
-        'LVA': 'LV', 'EST': 'EE', 'TUR': 'TR', 'UKR': 'UA', 'BLR': 'BY',
-        'MDA': 'MD', 'MNE': 'ME', 'MKD': 'MK', 'ALB': 'AL', 'BIH': 'BA',
-        'XKX': 'XK', 'CYP': 'CY', 'LUX': 'LU', 'ISL': 'IS', 'MLT': 'MT',
-        
-        # Autres corrections
-        'UNK': 'UNKNOWN', 'NAN': 'UNKNOWN', 'NONE': 'UNKNOWN',
-        '': 'UNKNOWN', 'NULL': 'UNKNOWN', 'NaN': 'UNKNOWN',
-        'EU27_2020': 'EU27', 'EU27-2020': 'EU27', 'EU27': 'EU27',
-        'EU28': 'EU27', 'EU': 'EU27',
-        None: 'UNKNOWN', np.nan: 'UNKNOWN'
-    }
-
-    def standardize_code(value):
-        if pd.isna(value):
-            return 'UNKNOWN'
-
-        code = str(value).upper().strip()
-        code = country_corrections.get(code, code)
-
-        if code in SPECIAL_COUNTRY_CODES:
-            return code
-
-        code = re.sub(r'[^A-Z]', '', code)
-        code = country_corrections.get(code, code)
-
-        if code in SPECIAL_COUNTRY_CODES:
-            return code
-        if not code:
-            return 'UNKNOWN'
-
-        return code[:2]
-
-    df[country_col] = df[country_col].apply(standardize_code)
-    
-    return df
-
-
-def enrich_and_prepare_for_warehouse(processed_dir: str, warehouse_dir: str) -> dict:
-    """
-    Enrichit les données transformées et les prépare pour le data warehouse
-    """
-    logger.info("🔗 Enrichissement et préparation pour le data warehouse...")
-    
-    # 1. Charger les données transformées
-    # Back on Track - trains de nuit
-    night_trains_path = Path(processed_dir) / "back_on_track" / "night_trains_processed.csv"
-    night_trains = pd.read_csv(night_trains_path) if night_trains_path.exists() else pd.DataFrame()
-    
-    # Eurostat - passagers
-    passengers_path = Path(processed_dir) / "eurostat" / "passengers_processed.csv"
-    passengers = pd.read_csv(passengers_path) if passengers_path.exists() else pd.DataFrame()
-    
-    # Eurostat - trafic
-    traffic_path = Path(processed_dir) / "eurostat" / "traffic_processed.csv"
-    traffic = pd.read_csv(traffic_path) if traffic_path.exists() else pd.DataFrame()
-    
-    # Émissions
-    emissions_path = Path(processed_dir) / "emissions" / "co2_emissions_processed.csv"
-    emissions = pd.read_csv(emissions_path) if emissions_path.exists() else pd.DataFrame()
-    
-    # GTFS France
-    gtfs_fr_path = Path(processed_dir) / "gtfs" / "fr" / "routes_processed.csv"
-    gtfs_fr = pd.read_csv(gtfs_fr_path) if gtfs_fr_path.exists() else pd.DataFrame()
-    
-    # GTFS Suisse
-    gtfs_ch_path = Path(processed_dir) / "gtfs" / "ch" / "routes_processed.csv"
-    gtfs_ch = pd.read_csv(gtfs_ch_path) if gtfs_ch_path.exists() else pd.DataFrame()
-    
-    # GTFS Allemagne
-    gtfs_de_path = Path(processed_dir) / "gtfs" / "de" / "routes_processed.csv"
-    gtfs_de = pd.read_csv(gtfs_de_path) if gtfs_de_path.exists() else pd.DataFrame()
-    
-    # 2. NETTOYAGE AMÉLIORÉ DES PAYS
-    logger.info("🧹 Nettoyage et standardisation des codes pays...")
-    
-    # Nettoyer les codes pays dans toutes les sources
-    if not night_trains.empty and 'country_code' in night_trains.columns:
-        night_trains = clean_and_standardize_country_codes(night_trains, 'country_code')
-        
-        # Analyser la distribution après nettoyage
-        night_train_countries = night_trains['country_code'].value_counts()
-        logger.info(f"📊 Distribution des pays (trains de nuit): {len(night_train_countries)} codes")
-        logger.info(f"   - UNKNOWN: {night_train_countries.get('UNKNOWN', 0)}")
-        logger.info(f"   - Top 5: {night_train_countries.head(5).to_dict()}")
-    
-    if not passengers.empty and 'geo' in passengers.columns:
-        passengers = passengers.rename(columns={'geo': 'country_code'})
-        passengers = clean_and_standardize_country_codes(passengers, 'country_code')
-    
-    if not emissions.empty and 'country_code' in emissions.columns:
-        emissions = clean_and_standardize_country_codes(emissions, 'country_code')
-    
-    # 3. ENRICHISSEMENT DES DONNÉES MANQUANTES
-    logger.info("🧩 Enrichissement des données manquantes...")
-    
-    years_list = list(range(2010, 2025))  # 2010 à 2024 inclus
-    country_ref = prepare_country_reference()
-    train_target_countries = sorted(set(MISSING_SYNTHETIC_COUNTRIES) | {'FR', 'DE', 'CH'})
-    train_targets = build_country_year_train_targets(
-        country_ref,
-        emissions,
-        years_list,
-        train_target_countries,
-        total_trains_per_year=950
-    )
-    
-    # --- Opérateurs ---
-    # Construire un DataFrame de base des opérateurs à partir des trains de nuit existants
-    operators_from_trains = pd.DataFrame(columns=['operator_id', 'operator_name'])
-    if not night_trains.empty and 'operators' in night_trains.columns:
-        operators_from_trains = add_operator_names(
-            operators_from_trains,
-            night_trains['operators']
+def _build_operator_dashboard(facts_path: Path, dim_operators: pd.DataFrame) -> pd.DataFrame:
+    aggs = {}
+    for chunk in pd.read_csv(facts_path, chunksize=200_000, low_memory=False):
+        chunk['distance_km'] = pd.to_numeric(chunk['distance_km'], errors='coerce').fillna(0)
+        chunk['duration_min'] = pd.to_numeric(chunk['duration_min'], errors='coerce').fillna(0)
+        chunk['is_night'] = _bool_series(chunk['is_night'], False)
+        grouped = chunk.groupby('operator_id').agg(
+            nb_trains=('fact_id','count'),
+            distance_totale_km=('distance_km','sum'),
+            duration_sum=('duration_min','sum'),
+            nb_trains_nuit=('is_night','sum'),
         )
-    
-    # Ajouter les opérateurs manquants
-    operators_df = add_missing_operators(operators_from_trains)
-    logger.info(f"✅ Opérateurs après enrichissement : {len(operators_df)}")
-    
-    # --- Trains de nuit ---
-    if not night_trains.empty:
-        night_trains = generate_night_trains(night_trains, years_list, operators_df)
+        for op_id, row in grouped.iterrows():
+            bucket = aggs.setdefault(int(op_id), {'nb_trains':0,'distance_totale_km':0.0,'duration_sum':0.0,'nb_trains_nuit':0})
+            for key in bucket:
+                bucket[key] += float(row[key])
 
-    # --- Calcul du max des route_id numériques pour les futurs trains de jour ---
-    max_route_id = 0
-    if not night_trains.empty and 'route_id' in night_trains.columns:
-        # Extraire les route_id purement numériques
-        numeric_routes = pd.to_numeric(night_trains['route_id'], errors='coerce').dropna()
-        if not numeric_routes.empty:
-            max_route_id = int(numeric_routes.max())
-    next_route_id = max_route_id + 1
+    rows = []
+    names = dict(zip(dim_operators['operator_id'], dim_operators['operator_name']))
+    for op_id, values in aggs.items():
+        n = int(values['nb_trains'])
+        night = int(values['nb_trains_nuit'])
+        rows.append({
+            'operator_id':op_id,'operator_name':names.get(op_id,'Unknown Operator'),
+            'nb_trains':n,'distance_totale_km':values['distance_totale_km'],
+            'duree_moyenne_min':values['duration_sum']/n if n else 0,
+            'nb_trains_nuit':night,'nb_trains_jour':n-night,
+        })
+    return pd.DataFrame(rows).sort_values('nb_trains', ascending=False) if rows else pd.DataFrame()
 
-    #-----------------------
-       # Ajouter la colonne is_night pour les trains de nuit (ils sont True)
-    if not night_trains.empty:
-        night_trains['is_night'] = True
 
-    # Générer les trains de jour
-    logger.info("🌞 Génération des trains de jour...")
-    # Liste des codes pays UE (utilisée aussi dans generate_synthetic_day_trains)
-    eu_codes = ['AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE']
-    
-    day_trains_gtfs = extract_day_trains_from_gtfs(processed_dir, operators_df, train_targets)
-    synthetic_codes = [code for code in MISSING_SYNTHETIC_COUNTRIES if code not in {'FR', 'DE', 'CH'}]
-    day_trains_synth = generate_synthetic_day_trains(operators_df, years_list, synthetic_codes, train_targets)
+def _create_sql() -> str:
+    return """
+DROP VIEW IF EXISTS dashboard_metrics CASCADE;
+DROP VIEW IF EXISTS operator_dashboard CASCADE;
 
-    # Ajouter une colonne route_id pour les trains de jour (si absente)
-    for df in [day_trains_gtfs, day_trains_synth]:
-        if not df.empty and 'route_id' not in df.columns:
-            df['route_id'] = None
-
-    # Fusionner tous les trains
-    all_trains = pd.concat([night_trains, day_trains_gtfs, day_trains_synth], ignore_index=True)
-
-    # Attribuer des route_id aux lignes qui en sont dépourvues
-    if 'route_id' not in all_trains.columns:
-        all_trains['route_id'] = None
-    mask_missing = all_trains['route_id'].isna()
-    for idx in all_trains[mask_missing].index:
-        all_trains.loc[idx, 'route_id'] = str(next_route_id)
-        next_route_id += 1
-
-    # Réattribuer des fact_id uniques
-    if not all_trains.empty:
-        all_trains['fact_id'] = range(1, len(all_trains) + 1)
-
-    # Donner au calcul de distance le meilleur texte d'itineraire disponible.
-    if 'itinerary' not in all_trains.columns:
-        all_trains['itinerary'] = pd.NA
-    itinerary_empty = (
-        all_trains['itinerary'].isna()
-        | (all_trains['itinerary'].astype(str).str.strip() == '')
-    )
-    if 'itinerary_long' in all_trains.columns:
-        long_available = (
-            all_trains['itinerary_long'].notna()
-            & (all_trains['itinerary_long'].astype(str).str.strip() != '')
-        )
-        fill_from_long = itinerary_empty & long_available
-        all_trains.loc[fill_from_long, 'itinerary'] = all_trains.loc[fill_from_long, 'itinerary_long']
-        itinerary_empty = (
-            all_trains['itinerary'].isna()
-            | (all_trains['itinerary'].astype(str).str.strip() == '')
-        )
-    if 'night_train' in all_trains.columns:
-        all_trains.loc[itinerary_empty, 'itinerary'] = all_trains.loc[itinerary_empty, 'night_train']
-
-    # --- Construction de la dimension des stops ---
-    dim_stops = build_dim_stops(processed_dir, warehouse_dir)
-
-    # --- Calcul des distances ---
-    if not all_trains.empty and 'itinerary' in all_trains.columns:
-        all_trains = compute_route_distance(all_trains, dim_stops)
-    else:
-        all_trains['distance_km'] = 0.0
-
-    # Les distances non resolues par les stops GTFS sont completees par une
-    # moyenne pays deterministe : 8% du reseau national, bornee a 50-1200 km.
-    # Cela evite les distances nulles pour les pays enrichis sans constante UE.
-    if not all_trains.empty and 'country_code' in all_trains.columns:
-        all_trains['distance_km'] = pd.to_numeric(all_trains['distance_km'], errors='coerce').fillna(0.0)
-        unresolved_distance = all_trains['distance_km'] <= 0
-        if unresolved_distance.any():
-            all_trains.loc[unresolved_distance, 'distance_km'] = all_trains.loc[
-                unresolved_distance, 'country_code'
-            ].apply(lambda code: mean_distance_from_reference(country_ref, code)).astype(float)
-
-        # Attribution nuit/jour non uniforme : night_train_index pilote le
-        # ratio attendu par pays. Les trains reels deja marques nuit restent
-        # nuit, puis les lignes synthetiques completent le quota deterministe.
-        night_ratio = dict(zip(
-            country_ref['country_code'],
-            country_ref['night_train_index'].apply(compute_night_train_ratio)
-        ))
-        all_trains['is_night'] = all_trains['is_night'].fillna(False).astype(bool)
-        for (country, year), group in all_trains.groupby(['country_code', 'year']):
-            ratio = float(night_ratio.get(country, 0))
-            target_night = int(round(len(group) * ratio))
-            current_night = int(all_trains.loc[group.index, 'is_night'].sum())
-            if target_night > current_night:
-                candidates = group[~group['is_night']].sort_values(['route_id', 'night_train']).head(target_night - current_night)
-                all_trains.loc[candidates.index, 'is_night'] = True
-
-    # --- Calcul des durées ---
-    all_trains = compute_night_train_durations(all_trains)
-
-    # Les trains generes peuvent introduire de nouveaux operateurs synthetiques.
-    if not all_trains.empty and 'operators' in all_trains.columns:
-        operators_df = add_operator_names(operators_df, all_trains['operators'])
-        logger.info(f"✅ Opérateurs après fusion trains jour/nuit : {len(operators_df)}")
-
-    # Remplacer night_trains par all_trains pour la suite (nom legacy du modele)
-    night_trains = all_trains
-
-    
-    # --- Statistiques pays ---
-    if not passengers.empty and not emissions.empty:
-        passengers, emissions = generate_country_stats(passengers, emissions, years_list, country_ref)
-    
-    # 4. Créer les DIMENSIONS (doit être fait avant les faits)
-    
-    # DIMENSION PAYS - Table maître des pays
-    logger.info("🌍 Création de la dimension pays...")
-    all_countries = pd.DataFrame()
-    country_sources = []
-    
-    # Liste complète des pays européens avec leurs codes et noms
-    european_countries_full = [
-        ('AL', 'Albania'), ('AT', 'Austria'), ('BA', 'Bosnia and Herzegovina'),
-        ('BE', 'Belgium'), ('BG', 'Bulgaria'), ('CH', 'Switzerland'),
-        ('CZ', 'Czech Republic'), ('DE', 'Germany'), ('DK', 'Denmark'),
-        ('EE', 'Estonia'), ('EL', 'Greece'), ('ES', 'Spain'), ('FI', 'Finland'),
-        ('FR', 'France'), ('GB', 'United Kingdom'), ('GR', 'Greece'),
-        ('HR', 'Croatia'), ('HU', 'Hungary'), ('IE', 'Ireland'), ('IS', 'Iceland'),
-        ('IT', 'Italy'), ('LI', 'Liechtenstein'), ('LT', 'Lithuania'),
-        ('LU', 'Luxembourg'), ('LV', 'Latvia'), ('MD', 'Moldova'),
-        ('ME', 'Montenegro'), ('MK', 'North Macedonia'), ('MT', 'Malta'),
-        ('NL', 'Netherlands'), ('NO', 'Norway'), ('PL', 'Poland'),
-        ('PT', 'Portugal'), ('RO', 'Romania'), ('RS', 'Serbia'), ('SE', 'Sweden'),
-        ('SI', 'Slovenia'), ('SK', 'Slovakia'), ('TR', 'Turkey'), ('UA', 'Ukraine'),
-        ('XK', 'Kosovo')
-    ]
-    
-    # Créer un DataFrame de base avec tous les pays européens
-    base_countries = pd.DataFrame(european_countries_full, columns=['country_code', 'country_name'])
-    
-    # Ajouter les pays des différentes sources
-    if not passengers.empty and 'country_code' in passengers.columns and 'country_name' in passengers.columns:
-        unique_passengers = passengers[['country_code', 'country_name']].drop_duplicates()
-        country_sources.append(unique_passengers)
-    
-    if not emissions.empty and 'country_code' in emissions.columns and 'country_name' in emissions.columns:
-        unique_emissions = emissions[['country_code', 'country_name']].drop_duplicates()
-        country_sources.append(unique_emissions)
-    
-    if not night_trains.empty and 'country_code' in night_trains.columns:
-        # Mapper les codes pays vers noms
-        country_mapping = dict(european_countries_full)
-        night_trains['country_name'] = night_trains['country_code'].map(country_mapping)
-        
-        # Pour les pays non reconnus, essayer de deviner à partir d'autres sources
-        unknown_mask = night_trains['country_name'].isna()
-        if unknown_mask.any():
-            # Logique de devinette améliorée (inchangée)
-            def guess_country_from_train(row):
-                train_name = str(row.get('night_train', '')).upper()
-                itinerary = str(row.get('itinerary', '')).upper()
-                
-                # Chercher des indices de pays
-                country_indicators = {
-                    'FR': ['PARIS', 'LYON', 'MARSEILLE', 'NICE', 'BORDEAUX'],
-                    'DE': ['BERLIN', 'HAMBURG', 'MUNICH', 'FRANKFURT', 'KÖLN'],
-                    'IT': ['ROMA', 'MILANO', 'VENICE', 'FLORENCE', 'NAPOLI'],
-                    'ES': ['MADRID', 'BARCELONA', 'VALENCIA', 'SEVILLA'],
-                    'GB': ['LONDON', 'EDINBURGH', 'GLASGOW', 'MANCHESTER'],
-                    'CH': ['ZURICH', 'GENEVA', 'BASEL', 'BERN'],
-                    'AT': ['WIEN', 'VIENNA', 'SALZBURG', 'INNSBRUCK'],
-                    'NL': ['AMSTERDAM', 'ROTTERDAM', 'UTRECHT'],
-                    'BE': ['BRUSSELS', 'BRUXELLES', 'ANTWERP'],
-                    'PL': ['WARSAW', 'WARSZAWA', 'KRAKOW'],
-                    'CZ': ['PRAGUE', 'PRAHA', 'BRNO'],
-                    'HU': ['BUDAPEST', 'DEBRECEN'],
-                    'RO': ['BUCHAREST', 'BUCURESTI', 'CLUJ'],
-                    'SE': ['STOCKHOLM', 'GOTHENBURG', 'MALMO'],
-                    'NO': ['OSLO', 'BERGEN', 'TRONDHEIM'],
-                    'DK': ['COPENHAGEN', 'KOBENHAVN', 'AARHUS'],
-                    'FI': ['HELSINKI', 'HELSINGFORS', 'TAMPERE']
-                }
-                
-                for code, indicators in country_indicators.items():
-                    for indicator in indicators:
-                        if indicator in train_name or indicator in itinerary:
-                            return code
-                
-                return 'UNKNOWN'
-            
-            # Appliquer la devinette
-            night_trains.loc[unknown_mask, 'country_code'] = night_trains.loc[unknown_mask].apply(
-                guess_country_from_train, axis=1
-            )
-            # Remapper les noms
-            night_trains['country_name'] = night_trains['country_code'].map(country_mapping)
-        
-        unique_trains = night_trains[['country_code', 'country_name']].drop_duplicates()
-        country_sources.append(unique_trains)
-    
-    # Combiner toutes les sources
-    if country_sources:
-        all_countries = pd.concat(country_sources, ignore_index=True).drop_duplicates()
-    
-    # Fusionner avec les pays de base pour s'assurer d'avoir tous les pays européens
-    if not all_countries.empty:
-        dim_countries = pd.merge(
-            base_countries,
-            all_countries,
-            on='country_code',
-            how='outer',
-            suffixes=('_base', '_source')
-        )
-        
-        # Utiliser le nom source seulement s'il apporte une vraie valeur.
-        source_names = dim_countries['country_name_source']
-        source_text = source_names.fillna('').astype(str).str.strip()
-        source_invalid = (
-            source_names.isna()
-            | source_text.str.upper().isin(INVALID_COUNTRY_NAMES)
-            | (source_text.str.upper() == dim_countries['country_code'].astype(str).str.upper())
-        )
-        dim_countries['country_name'] = source_names.mask(
-            source_invalid,
-            dim_countries['country_name_base']
-        )
-        dim_countries['country_name'] = dim_countries['country_name'].fillna(
-            dim_countries['country_code']
-        )
-        
-        # Supprimer les colonnes temporaires
-        dim_countries = dim_countries[['country_code', 'country_name']]
-    else:
-        dim_countries = base_countries
-    
-    # Ajouter des entrées spéciales pour les cas non résolus
-    special_countries = pd.DataFrame([
-        {'country_code': 'UNKNOWN', 'country_name': 'Unknown Country'},
-        {'country_code': 'OTHER', 'country_name': 'Other European Country'},
-        {'country_code': 'MULTI', 'country_name': 'Multiple Countries'},
-        {'country_code': 'EU27', 'country_name': 'European Union (27)'}
-    ])
-    
-    dim_countries = pd.concat([dim_countries, special_countries], ignore_index=True)
-    
-    # Supprimer les doublons en gardant les noms explicites des entrees speciales
-    dim_countries = dim_countries.drop_duplicates(subset=['country_code'], keep='last')
-
-    base_country_names = dict(zip(base_countries['country_code'], base_countries['country_name']))
-    final_names = dim_countries['country_name'].fillna('').astype(str).str.strip()
-    final_invalid = (
-        dim_countries['country_name'].isna()
-        | final_names.str.upper().isin(INVALID_COUNTRY_NAMES)
-        | (final_names.str.upper() == dim_countries['country_code'].astype(str).str.upper())
-    )
-    dim_countries.loc[final_invalid, 'country_name'] = (
-        dim_countries.loc[final_invalid, 'country_code'].map(base_country_names)
-    )
-    dim_countries['country_name'] = dim_countries['country_name'].fillna(
-        dim_countries['country_code']
-    )
-    
-    # Créer l'ID pays
-    dim_countries['country_id'] = range(1, len(dim_countries) + 1)
-    dim_countries = dim_countries[['country_id', 'country_code', 'country_name']]
-    
-    logger.info(f"✅ Dimension pays créée: {len(dim_countries)} pays")
-    
-    # DIMENSION ANNÉES
-    all_years = set()
-    
-    if not passengers.empty and 'year' in passengers.columns:
-        all_years.update(passengers['year'].dropna().astype(int).tolist())
-    
-    if not traffic.empty and 'year' in traffic.columns:
-        all_years.update(traffic['year'].dropna().astype(int).tolist())
-    
-    if not emissions.empty and 'year' in emissions.columns:
-        all_years.update(emissions['year'].dropna().astype(int).tolist())
-    
-    if not night_trains.empty and 'year' in night_trains.columns:
-        all_years.update(night_trains['year'].dropna().astype(int).tolist())
-    
-    dim_years = pd.DataFrame({'year': sorted(all_years)})
-    dim_years['year_id'] = range(1, len(dim_years) + 1)
-    dim_years['is_after_2010'] = dim_years['year'] >= 2010
-    
-    # DIMENSION OPÉRATEURS (on utilise operators_df déjà construit)
-    dim_operators = operators_df.copy()
-    
-    # --- AJOUT DE L'OPÉRATEUR INCONNU (ID 0) ---
-    if 0 not in dim_operators['operator_id'].values:
-        unknown_op = pd.DataFrame({'operator_id': [0], 'operator_name': ['Unknown Operator']})
-        dim_operators = pd.concat([unknown_op, dim_operators], ignore_index=True)
-        logger.info("➕ Ajout de l'opérateur inconnu (ID 0) dans dim_operators")
-    
-    # 5. Créer les FAITS avec les clés étrangères
-    
-    # FAITS : Trains de nuit
-    facts_night_trains = pd.DataFrame()
-    if not night_trains.empty:
-        facts_night_trains = night_trains.copy()
-        
-        # Ajouter les clés étrangères
-        # Lier avec pays
-        if not dim_countries.empty and 'country_code' in facts_night_trains.columns:
-            country_mapping = dict(zip(dim_countries['country_code'], dim_countries['country_id']))
-            facts_night_trains['country_id'] = facts_night_trains['country_code'].map(country_mapping)
-            
-            # Remplacer les valeurs manquantes par UNKNOWN
-            unknown_id = dim_countries[dim_countries['country_code'] == 'UNKNOWN']['country_id'].iloc[0]
-            facts_night_trains['country_id'] = facts_night_trains['country_id'].fillna(unknown_id).astype(int)
-        
-        # Lier avec années
-        if not dim_years.empty and 'year' in facts_night_trains.columns:
-            year_mapping = dict(zip(dim_years['year'], dim_years['year_id']))
-            facts_night_trains['year_id'] = facts_night_trains['year'].map(year_mapping)
-            
-            # Remplacer les valeurs manquantes
-            if facts_night_trains['year_id'].isna().any():
-                most_recent_year_id = dim_years['year_id'].max()
-                facts_night_trains['year_id'] = facts_night_trains['year_id'].fillna(most_recent_year_id).astype(int)
-        
-        # Lier avec opérateurs
-        if not dim_operators.empty and 'operators' in facts_night_trains.columns:
-            operator_mapping = dict(zip(dim_operators['operator_name'], dim_operators['operator_id']))
-            facts_night_trains['operator_id'] = facts_night_trains['operators'].map(operator_mapping)
-            
-            # Remplacer les valeurs manquantes par 0 (opérateur inconnu)
-            facts_night_trains['operator_id'] = facts_night_trains['operator_id'].fillna(0).astype(int)
-        
-        # Sélectionner les colonnes pour les faits
-        fact_cols = ['fact_id', 'route_id', 'night_train', 'country_id', 'year_id', 'operator_id', 'is_night', 'distance_km', 'duration_min']
-        available_cols = [col for col in fact_cols if col in facts_night_trains.columns]
-        facts_night_trains = facts_night_trains[available_cols]
-    
-    # 6. FAITS : Statistiques pays (métriques agrégées)
-    facts_country_stats = pd.DataFrame()
-    
-    if not passengers.empty and not emissions.empty:
-        # Préparer les données passagers
-        passengers_agg = passengers.groupby(['country_code', 'year'])['passengers'].mean().reset_index()
-        
-        # Préparer les données émissions
-        emissions_agg = emissions.groupby(['country_code', 'year'])['co2_emissions'].mean().reset_index()
-        
-        # Fusionner avec jointure externe pour garder toutes les combinaisons
-        metrics = pd.merge(
-            passengers_agg,
-            emissions_agg,
-            on=['country_code', 'year'],
-            how='outer'
-        )
-        
-        # Calculer les métriques si les données existent
-        mask = (metrics['passengers'].notna()) & (metrics['co2_emissions'].notna())
-        metrics.loc[mask, 'co2_per_passenger'] = metrics.loc[mask, 'co2_emissions'] / metrics.loc[mask, 'passengers']
-        
-        # Remplir les valeurs manquantes avec des données réalistes (même code que précédemment)
-        for country in metrics['country_code'].unique():
-            country_mask = metrics['country_code'] == country
-            if metrics.loc[country_mask, 'co2_emissions'].isna().any():
-                country_avg = metrics.loc[country_mask, 'co2_emissions'].mean()
-                if pd.isna(country_avg):
-                    global_avg = metrics['co2_emissions'].mean()
-                    metrics.loc[country_mask, 'co2_emissions'] = metrics.loc[country_mask, 'co2_emissions'].fillna(global_avg)
-                else:
-                    metrics.loc[country_mask, 'co2_emissions'] = metrics.loc[country_mask, 'co2_emissions'].fillna(country_avg)
-        
-        for country in metrics['country_code'].unique():
-            country_mask = metrics['country_code'] == country
-            if metrics.loc[country_mask, 'passengers'].isna().any():
-                country_avg = metrics.loc[country_mask, 'passengers'].mean()
-                if pd.isna(country_avg):
-                    global_avg = metrics['passengers'].mean()
-                    metrics.loc[country_mask, 'passengers'] = metrics.loc[country_mask, 'passengers'].fillna(global_avg)
-                else:
-                    metrics.loc[country_mask, 'passengers'] = metrics.loc[country_mask, 'passengers'].fillna(country_avg)
-        
-        # Recalculer co2_per_passenger pour toutes les lignes
-        metrics['co2_per_passenger'] = metrics['co2_emissions'] / metrics['passengers']
-        metrics['co2_per_passenger'] = metrics['co2_per_passenger'].replace([np.inf, -np.inf], np.nan)
-        
-        # Remplacer les NaN de co2_per_passenger par une valeur réaliste
-        avg_co2_per_pass = metrics['co2_per_passenger'].mean()
-        std_co2_per_pass = metrics['co2_per_passenger'].std()
-        if pd.isna(avg_co2_per_pass):
-            avg_co2_per_pass = 0.05
-            std_co2_per_pass = 0.02
-        nan_mask = metrics['co2_per_passenger'].isna()
-        if nan_mask.any():
-            metrics.loc[nan_mask, 'co2_per_passenger'] = abs(avg_co2_per_pass)
-        
-        # Ajouter les clés étrangères
-        if not dim_countries.empty:
-            country_mapping = dict(zip(dim_countries['country_code'], dim_countries['country_id']))
-            metrics['country_id'] = metrics['country_code'].map(country_mapping)
-            unknown_id = dim_countries[dim_countries['country_code'] == 'UNKNOWN']['country_id'].iloc[0]
-            metrics['country_id'] = metrics['country_id'].fillna(unknown_id).astype(int)
-        
-        if not dim_years.empty:
-            year_mapping = dict(zip(dim_years['year'], dim_years['year_id']))
-            metrics['year_id'] = metrics['year'].map(year_mapping)
-            if metrics['year_id'].isna().any():
-                most_recent_year_id = dim_years['year_id'].max()
-                metrics['year_id'] = metrics['year_id'].fillna(most_recent_year_id).astype(int)
-        
-        # Créer un ID unique
-        metrics['stat_id'] = range(1, len(metrics) + 1)
-        
-        # Sélectionner les colonnes
-        fact_cols = ['stat_id', 'country_id', 'year_id', 'passengers', 'co2_emissions', 'co2_per_passenger']
-        facts_country_stats = metrics[fact_cols]
-        
-        # Conversion numérique
-        for col in ['passengers', 'co2_emissions', 'co2_per_passenger']:
-            facts_country_stats.loc[:, col] = pd.to_numeric(facts_country_stats[col], errors='coerce')
-        
-        # Dernier remplissage
-        for col in ['passengers', 'co2_emissions', 'co2_per_passenger']:
-            if facts_country_stats[col].isna().any():
-                col_avg = facts_country_stats[col].mean()
-                facts_country_stats[col] = facts_country_stats[col].fillna(col_avg)
-    
-    # 7. Table DASHBOARD_METRICS (agrégé par pays)
-    dashboard_metrics = pd.DataFrame()
-    if not facts_country_stats.empty:
-        dashboard_metrics = facts_country_stats.groupby('country_id').agg({
-            'passengers': 'mean',
-            'co2_emissions': 'mean',
-            'co2_per_passenger': 'mean'
-        }).reset_index()
-        
-        country_info = dict(zip(dim_countries['country_id'], dim_countries['country_name']))
-        dashboard_metrics['country_name'] = dashboard_metrics['country_id'].map(country_info)
-        dashboard_metrics['country_name'] = dashboard_metrics['country_name'].fillna('Unknown')
-        
-        country_code_info = dict(zip(dim_countries['country_id'], dim_countries['country_code']))
-        dashboard_metrics['country_code'] = dashboard_metrics['country_id'].map(country_code_info)
-        dashboard_metrics['country_code'] = dashboard_metrics['country_code'].fillna('UNK')
-        
-        dashboard_metrics = dashboard_metrics[['country_id', 'country_code', 'country_name', 
-                                             'passengers', 'co2_emissions', 'co2_per_passenger']]
-    
-    # 8. Sauvegarder dans le data warehouse
-    warehouse_path = Path(warehouse_dir)
-    warehouse_path.mkdir(parents=True, exist_ok=True)
-
-    # --- Dashboard opérateurs ---
-    if not facts_night_trains.empty and 'operator_id' in facts_night_trains.columns:
-        op_source = facts_night_trains.copy()
-        for col in ['distance_km', 'duration_min']:
-            if col not in op_source.columns:
-                op_source[col] = 0.0
-            op_source[col] = pd.to_numeric(op_source[col], errors='coerce').fillna(0.0)
-        if 'is_night' not in op_source.columns:
-            op_source['is_night'] = True
-        op_source['is_night'] = op_source['is_night'].fillna(True).astype(bool)
-
-        op_dash = op_source.groupby('operator_id').agg(
-            nb_trains=('fact_id', 'count'),
-            distance_totale_km=('distance_km', 'sum'),
-            duree_moyenne_min=('duration_min', 'mean'),
-            nb_trains_nuit=('is_night', lambda x: x.eq(True).sum()),
-            nb_trains_jour=('is_night', lambda x: x.eq(False).sum())
-        ).reset_index()
-        op_dash = op_dash.merge(dim_operators[['operator_id', 'operator_name']],
-                                on='operator_id', how='left')
-        op_dash.to_csv(warehouse_path / "operator_dashboard.csv", index=False)
-        logger.info(f"✅ operator_dashboard créé : {len(op_dash)} opérateurs")
-    
-    # Dimensions d'abord
-    if not dim_countries.empty:
-        dim_countries.to_csv(warehouse_path / "dim_countries.csv", index=False)
-        logger.info(f"✅ dim_countries: {len(dim_countries)} pays")
-        logger.info(f"   - Dont {len(dim_countries[dim_countries['country_code'] == 'UNKNOWN'])} pays inconnus")
-    
-    if not dim_years.empty:
-        dim_years.to_csv(warehouse_path / "dim_years.csv", index=False)
-        logger.info(f"✅ dim_years: {len(dim_years)} années")
-    
-    if not dim_operators.empty:
-        dim_operators.to_csv(warehouse_path / "dim_operators.csv", index=False)
-        logger.info(f"✅ dim_operators: {len(dim_operators)} opérateurs")
-    
-    # Faits ensuite
-    if not facts_night_trains.empty:
-        for col in ['country_id', 'year_id', 'operator_id']:
-            if col in facts_night_trains.columns:
-                facts_night_trains[col] = facts_night_trains[col].fillna(0).astype(int)
-        for col in ['distance_km', 'duration_min']:
-            if col in facts_night_trains.columns:
-                facts_night_trains[col] = pd.to_numeric(
-                    facts_night_trains[col], errors='coerce'
-                ).fillna(0.0)
-        if 'is_night' in facts_night_trains.columns:
-            facts_night_trains['is_night'] = facts_night_trains['is_night'].fillna(True).astype(bool)
-        facts_night_trains.to_csv(warehouse_path / "facts_night_trains.csv", index=False)
-        logger.info(f"✅ facts_night_trains: {len(facts_night_trains)} trajets")
-        
-        if 'country_id' in facts_night_trains.columns:
-            unknown_id = dim_countries[dim_countries['country_code'] == 'UNKNOWN']['country_id'].iloc[0]
-            unknown_count = (facts_night_trains['country_id'] == unknown_id).sum()
-            logger.info(f"   - Trains avec pays inconnu: {unknown_count} ({unknown_count/len(facts_night_trains)*100:.1f}%)")
-    
-    if not facts_country_stats.empty:
-        logger.info(f"📊 Vérification de facts_country_stats:")
-        logger.info(f"   - Total enregistrements: {len(facts_country_stats)}")
-        unknown_id = dim_countries[dim_countries['country_code'] == 'UNKNOWN']['country_id'].iloc[0]
-        unknown_stats = (facts_country_stats['country_id'] == unknown_id).sum()
-        logger.info(f"   - Statistiques avec pays inconnu: {unknown_stats}")
-        facts_country_stats.to_csv(warehouse_path / "facts_country_stats.csv", index=False)
-        logger.info(f"✅ facts_country_stats sauvegardé: {len(facts_country_stats)} statistiques")
-    
-    if not dashboard_metrics.empty:
-        dashboard_metrics.to_csv(warehouse_path / "dashboard_metrics.csv", index=False)
-        logger.info(f"✅ dashboard_metrics: {len(dashboard_metrics)} pays")
-    
-    logger.info(f"✅ Data warehouse préparé dans {warehouse_path}")
-    
-    # 9. Créer un script SQL de création des tables
-    create_sql = """
--- Script de création des tables du data warehouse ObRail
--- Ordre de chargement: 1. Dimensions, 2. Faits, 3. Vues
-
--- Suppression de la vue si elle existe
-DROP VIEW IF EXISTS dashboard_metrics;
-
--- ============================================================
--- DIMENSIONS
--- ============================================================
-
--- Table des pays
+DROP TABLE IF EXISTS facts_night_trains CASCADE;
+DROP TABLE IF EXISTS facts_country_stats CASCADE;
+DROP TABLE IF EXISTS dim_stops CASCADE;
+DROP TABLE IF EXISTS dim_operators CASCADE;
+DROP TABLE IF EXISTS dim_years CASCADE;
 DROP TABLE IF EXISTS dim_countries CASCADE;
+
 CREATE TABLE dim_countries (
     country_id INTEGER PRIMARY KEY,
     country_code VARCHAR(10) UNIQUE NOT NULL,
     country_name VARCHAR(100) NOT NULL
 );
-
--- Table des années
-DROP TABLE IF EXISTS dim_years CASCADE;
 CREATE TABLE dim_years (
     year_id INTEGER PRIMARY KEY,
     year INTEGER NOT NULL,
     is_after_2010 BOOLEAN NOT NULL DEFAULT TRUE
 );
-
--- Table des opérateurs
-DROP TABLE IF EXISTS dim_operators CASCADE;
 CREATE TABLE dim_operators (
     operator_id INTEGER PRIMARY KEY,
     operator_name VARCHAR(200) NOT NULL
 );
-
--- Table des arrêts (NOUVELLE)
-DROP TABLE IF EXISTS dim_stops CASCADE;
 CREATE TABLE dim_stops (
-    stop_id_dim INTEGER PRIMARY KEY,
-    stop_name VARCHAR(200) NOT NULL,
-    stop_lat NUMERIC(10, 6),
-    stop_lon NUMERIC(10, 6),
-    stop_id VARCHAR(100),
-    source_country VARCHAR(2)
+    stop_id_dim BIGINT PRIMARY KEY,
+    stop_name VARCHAR(250) NOT NULL,
+    stop_lat NUMERIC(10,6),
+    stop_lon NUMERIC(10,6),
+    stop_id VARCHAR(150),
+    source_country VARCHAR(3)
 );
 
--- ============================================================
--- FAITS
--- ============================================================
-
--- Table de faits des trajets (nuit + jour)
-DROP TABLE IF EXISTS facts_night_trains CASCADE;
+-- Nom de table conservé pour compatibilité avec le projet existant.
+-- `train` est le champ canonique. `night_train` est seulement un alias SQL
+-- généré pour les anciens endpoints et pourra être supprimé plus tard.
 CREATE TABLE facts_night_trains (
-    fact_id INTEGER PRIMARY KEY,
-    route_id VARCHAR(50) NOT NULL,
-    night_train VARCHAR(200) NOT NULL,
-    country_id INTEGER NOT NULL,
-    year_id INTEGER NOT NULL,
-    operator_id INTEGER NOT NULL,
-    is_night BOOLEAN NOT NULL DEFAULT TRUE,
-    distance_km NUMERIC(10, 2) DEFAULT 0,
-    duration_min NUMERIC(10, 1) DEFAULT 0,
-    FOREIGN KEY (country_id) REFERENCES dim_countries(country_id),
-    FOREIGN KEY (year_id) REFERENCES dim_years(year_id),
-    FOREIGN KEY (operator_id) REFERENCES dim_operators(operator_id)
+    fact_id BIGINT PRIMARY KEY,
+    route_id VARCHAR(150) NOT NULL,
+    train VARCHAR(300) NOT NULL,
+    night_train VARCHAR(300) GENERATED ALWAYS AS (train) STORED,
+    country_id INTEGER NOT NULL REFERENCES dim_countries(country_id),
+    year_id INTEGER NOT NULL REFERENCES dim_years(year_id),
+    operator_id INTEGER NOT NULL REFERENCES dim_operators(operator_id),
+    is_night BOOLEAN NOT NULL DEFAULT FALSE,
+    distance_km NUMERIC(12,2) DEFAULT 0,
+    duration_min NUMERIC(12,2) DEFAULT 0,
+    is_synthetic BOOLEAN NOT NULL DEFAULT FALSE,
+    data_source VARCHAR(80) NOT NULL DEFAULT 'unknown'
 );
+CREATE INDEX idx_facts_trains_country ON facts_night_trains(country_id);
+CREATE INDEX idx_facts_trains_year ON facts_night_trains(year_id);
+CREATE INDEX idx_facts_trains_operator ON facts_night_trains(operator_id);
+CREATE INDEX idx_facts_trains_night ON facts_night_trains(is_night);
+CREATE INDEX idx_facts_trains_synthetic ON facts_night_trains(is_synthetic);
 
--- Table de faits pour les statistiques par pays
-DROP TABLE IF EXISTS facts_country_stats CASCADE;
 CREATE TABLE facts_country_stats (
-    stat_id INTEGER PRIMARY KEY,
-    country_id INTEGER NOT NULL,
-    year_id INTEGER NOT NULL,
-    passengers NUMERIC(15, 2) NOT NULL,
-    co2_emissions NUMERIC(15, 4) NOT NULL,
-    co2_per_passenger NUMERIC(15, 6) NOT NULL,
-    FOREIGN KEY (country_id) REFERENCES dim_countries(country_id),
-    FOREIGN KEY (year_id) REFERENCES dim_years(year_id)
+    stat_id BIGINT PRIMARY KEY,
+    country_id INTEGER NOT NULL REFERENCES dim_countries(country_id),
+    year_id INTEGER NOT NULL REFERENCES dim_years(year_id),
+    passengers NUMERIC(20,4) NOT NULL,
+    co2_emissions NUMERIC(20,6) NOT NULL,
+    co2_per_passenger NUMERIC(20,8) NOT NULL
 );
 
--- ============================================================
--- VUES
--- ============================================================
-
--- Vue dashboard pays
 CREATE VIEW dashboard_metrics AS
-SELECT 
-    c.country_id,
-    c.country_name,
-    c.country_code,
-    AVG(s.passengers)::NUMERIC(15, 2) as avg_passengers,
-    AVG(s.co2_emissions)::NUMERIC(15, 4) as avg_co2_emissions,
-    AVG(s.co2_per_passenger)::NUMERIC(15, 6) as avg_co2_per_passenger
+SELECT c.country_id, c.country_name, c.country_code,
+       AVG(s.passengers)::NUMERIC(20,2) AS avg_passengers,
+       AVG(s.co2_emissions)::NUMERIC(20,4) AS avg_co2_emissions,
+       AVG(s.co2_per_passenger)::NUMERIC(20,6) AS avg_co2_per_passenger
 FROM facts_country_stats s
 JOIN dim_countries c ON s.country_id = c.country_id
 GROUP BY c.country_id, c.country_name, c.country_code;
 
--- Vue dashboard opérateurs (NOUVELLE)
 CREATE VIEW operator_dashboard AS
-SELECT 
-    o.operator_id,
-    o.operator_name,
-    COUNT(f.fact_id) as nb_trains,
-    SUM(CASE WHEN f.is_night = TRUE THEN 1 ELSE 0 END) as nb_trains_nuit,
-    SUM(CASE WHEN f.is_night = FALSE THEN 1 ELSE 0 END) as nb_trains_jour,
-    COALESCE(SUM(f.distance_km), 0)::NUMERIC(15, 2) as distance_totale_km,
-    COALESCE(AVG(f.duration_min), 0)::NUMERIC(10, 1) as duree_moyenne_min
+SELECT o.operator_id, o.operator_name,
+       COUNT(f.fact_id) AS nb_trains,
+       SUM(CASE WHEN f.is_night THEN 1 ELSE 0 END) AS nb_trains_nuit,
+       SUM(CASE WHEN NOT f.is_night THEN 1 ELSE 0 END) AS nb_trains_jour,
+       COALESCE(SUM(f.distance_km),0)::NUMERIC(20,2) AS distance_totale_km,
+       COALESCE(AVG(f.duration_min),0)::NUMERIC(12,2) AS duree_moyenne_min
 FROM dim_operators o
 LEFT JOIN facts_night_trains f ON o.operator_id = f.operator_id
 GROUP BY o.operator_id, o.operator_name
 ORDER BY nb_trains DESC;
 """
-    
-    with open(warehouse_path / "create_tables.sql", 'w', encoding='utf-8') as f:
-        f.write(create_sql)
-    
-    # 10. Créer un rapport de traçabilité
-    traceability_report = {
-        'transformations_applied': [
-            'Nettoyage des valeurs manquantes',
-            'Standardisation améliorée des formats de pays',
-            'Filtrage des donnees avant 2010',
-            'Creation des cles etrangeres',
-            'Calcul des metriques agregees',
-            'Completement des donnees manquantes avec valeurs realistes',
-            'Génération de trains de nuit historiques',
-            'Génération de trains de jour pour comparaison',
-            'Génération de statistiques pays pour entités manquantes',
-            'Ajout et dédoublonnage des opérateurs manquants'
+
+
+def enrich_and_prepare_for_warehouse(processed_dir: str, warehouse_dir: str) -> dict:
+    logger.info("🔗 Enrichissement et préparation du warehouse...")
+    processed = Path(processed_dir)
+    warehouse = Path(warehouse_dir)
+    warehouse.mkdir(parents=True, exist_ok=True)
+    ref = load_country_reference()
+
+    back_path = processed / 'back_on_track' / 'trains_processed.csv'
+    back = pd.read_csv(back_path, low_memory=False) if back_path.exists() else pd.DataFrame()
+    passengers_path = processed / 'eurostat' / 'passengers_processed.csv'
+    traffic_path = processed / 'eurostat' / 'traffic_processed.csv'
+    emissions_path = processed / 'emissions' / 'co2_emissions_processed.csv'
+    passengers = pd.read_csv(passengers_path, low_memory=False) if passengers_path.exists() else pd.DataFrame()
+    traffic = pd.read_csv(traffic_path, low_memory=False) if traffic_path.exists() else pd.DataFrame()
+    emissions = pd.read_csv(emissions_path, low_memory=False) if emissions_path.exists() else pd.DataFrame()
+
+    dim_countries, dim_years, dim_operators, observed_counts = _build_dimensions(processed, ref, back)
+    dim_stops = build_dim_stops(str(processed), str(warehouse))
+    dim_countries.to_csv(warehouse / 'dim_countries.csv', index=False)
+    dim_years.to_csv(warehouse / 'dim_years.csv', index=False)
+    dim_operators.to_csv(warehouse / 'dim_operators.csv', index=False)
+
+    country_ids = dict(zip(dim_countries['country_code'], dim_countries['country_id']))
+    year_ids = dict(zip(dim_years['year'], dim_years['year_id']))
+    operator_ids = dict(zip(dim_operators['operator_name'], dim_operators['operator_id']))
+    fallback_distance = _country_fallback_distance_map(ref)
+
+    facts_path = warehouse / 'facts_night_trains.csv'
+    if facts_path.exists():
+        facts_path.unlink()
+    first_write = True
+    next_fact_id = 1
+    real_gtfs_count = 0
+
+    # 1) Services GTFS réels : lecture/écriture par chunks.
+    for country, path in _gtfs_service_files(processed):
+        logger.info("📦 Injection GTFS réel %s : %s", country, path.name)
+        for chunk in pd.read_csv(path, chunksize=FACT_WRITE_CHUNK, low_memory=False):
+            prepared = _prepare_fact_chunk(chunk, next_fact_id, country_ids, year_ids, operator_ids, fallback_distance)
+            first_write = _append_facts(prepared, facts_path, first_write)
+            next_fact_id += len(prepared)
+            real_gtfs_count += len(prepared)
+
+    # 2) Back on Track réel. Petit volume : calcul distance/durée plus détaillé.
+    bot_count = 0
+    bot_night_routes = {}
+    if not back.empty:
+        for country, group in back.groupby('country_code'):
+            bot_night_routes[str(country)] = group['itinerary'].dropna().astype(str).drop_duplicates().tolist()[:50]
+        if 'distance_km' not in back.columns:
+            back = compute_route_distance(back, dim_stops)
+        back = compute_night_train_durations(back)
+        prepared = _prepare_fact_chunk(back, next_fact_id, country_ids, year_ids, operator_ids, fallback_distance)
+        first_write = _append_facts(prepared, facts_path, first_write)
+        next_fact_id += len(prepared)
+        bot_count = len(prepared)
+
+    # 3) Synthétique : uniquement les pays sans GTFS réel.
+    targets = _calibrate_synthetic_targets(ref, observed_counts)
+    traffic_factors = _traffic_factor_map(traffic)
+    covered_gtfs = {c for c, count in observed_counts.items() if count > 0}
+    synthetic_count = 0
+    synthetic_country_counts = {}
+    ref_indexed = ref.set_index('country_code')
+
+    for country in [c for c in ref['country_code'] if c not in covered_gtfs]:
+        row = ref_indexed.loc[country]
+        if float(row['rail_network_km']) <= 0:
+            synthetic_country_counts[country] = 0
+            continue
+        base_target = targets.get(country, 0)
+        ratio = _night_ratio(row)
+        operator = OPERATOR_BY_COUNTRY.get(country, f"National Railway of {country}")
+        fallback = fallback_distance.get(country, 120.0)
+        total_country = 0
+        for year in ANALYSIS_YEARS:
+            factor = traffic_factors.get((country, year), _generic_year_factor(year))
+            n = int(round(base_target * factor))
+            n = min(n, SYNTHETIC_MAX_PER_COUNTRY_YEAR)
+            synthetic = _generate_synthetic_chunk(
+                country, year, n, ratio, operator, fallback, bot_night_routes.get(country)
+            )
+            if synthetic.empty:
+                continue
+            prepared = _prepare_fact_chunk(synthetic, next_fact_id, country_ids, year_ids, operator_ids, fallback_distance)
+            first_write = _append_facts(prepared, facts_path, first_write)
+            next_fact_id += len(prepared)
+            synthetic_count += len(prepared)
+            total_country += len(prepared)
+        synthetic_country_counts[country] = total_country
+
+    if first_write:
+        # Toujours produire un CSV avec en-têtes même si aucune ligne n'est disponible.
+        pd.DataFrame(columns=[
+            'fact_id','route_id','train','country_id','year_id','operator_id','is_night',
+            'distance_km','duration_min','is_synthetic','data_source'
+        ]).to_csv(facts_path, index=False)
+
+    # Statistiques pays : toutes les combinaisons pays/année du référentiel.
+    stats, stats_quality = _complete_country_stats(ref, passengers, emissions)
+    stats['country_id'] = stats['country_code'].map(country_ids).astype(int)
+    stats['year_id'] = stats['year'].map(year_ids).astype(int)
+    stats.insert(0, 'stat_id', range(1, len(stats) + 1))
+    facts_country_stats = stats[[
+        'stat_id','country_id','year_id','passengers','co2_emissions','co2_per_passenger'
+    ]]
+    facts_country_stats.to_csv(warehouse / 'facts_country_stats.csv', index=False)
+    stats_quality.to_csv(warehouse / 'country_stats_quality.csv', index=False)
+
+    dashboard = facts_country_stats.merge(dim_countries, on='country_id', how='left').groupby(
+        ['country_id','country_name','country_code'], as_index=False
+    ).agg(
+        avg_passengers=('passengers','mean'),
+        avg_co2_emissions=('co2_emissions','mean'),
+        avg_co2_per_passenger=('co2_per_passenger','mean'),
+    )
+    dashboard.to_csv(warehouse / 'dashboard_metrics.csv', index=False)
+
+    operator_dashboard = _build_operator_dashboard(facts_path, dim_operators)
+    operator_dashboard.to_csv(warehouse / 'operator_dashboard.csv', index=False)
+
+    sql = _create_sql()
+    (warehouse / 'create_tables.sql').write_text(sql, encoding='utf-8')
+
+    total_trains = real_gtfs_count + bot_count + synthetic_count
+    # Compter jour/nuit et provenance sans charger plusieurs millions de lignes.
+    night = day = synthetic_verified = 0
+    source_counts = {}
+    for chunk in pd.read_csv(facts_path, usecols=['is_night','is_synthetic','data_source'], chunksize=250_000):
+        is_night = _bool_series(chunk['is_night'], False)
+        is_synth = _bool_series(chunk['is_synthetic'], False)
+        night += int(is_night.sum())
+        day += int((~is_night).sum())
+        synthetic_verified += int(is_synth.sum())
+        for source, count in chunk['data_source'].value_counts().items():
+            source_counts[str(source)] = source_counts.get(str(source), 0) + int(count)
+
+    report = {
+        'transformations_applied':[
+            'Conservation des GTFS à granularité trip',
+            'Traitement stop_times par chunks',
+            'Jour/nuit déterminé par horaires réels GTFS',
+            'Champ canonique train + booléen is_night',
+            'Synthétique conservé et calibré sur les volumes GTFS observés',
+            'Aucune promotion artificielle des trains GTFS réels en train de nuit',
+            'Traçabilité réel/synthétique avec is_synthetic et data_source',
+            'Statistiques pays complétées 2010-2024 par référentiel quand Eurostat manque',
         ],
-        'data_sources': ['back_on_track', 'eurostat', 'emissions', 'gtfs_fr', 'gtfs_ch', 'gtfs_de'],
-        'tables_created': {
-            'dimensions': ['dim_countries.csv', 'dim_years.csv', 'dim_operators.csv', 'dim_stops.csv'],
-            'facts': ['facts_night_trains.csv', 'facts_country_stats.csv'],
-            'dashboard': ['dashboard_metrics.csv', 'operator_dashboard.csv']
-            
+        'data_sources':['back_on_track','eurostat','emissions'] + [f'gtfs_{c.lower()}' for c in sorted(covered_gtfs)],
+        'tables_created':{
+            'dimensions':['dim_countries.csv','dim_years.csv','dim_operators.csv','dim_stops.csv'],
+            'facts':['facts_night_trains.csv','facts_country_stats.csv'],
+            'quality':['country_stats_quality.csv'],
+            'dashboard':['dashboard_metrics.csv','operator_dashboard.csv'],
         },
-        'data_quality': {
-            'total_countries': len(dim_countries) if not dim_countries.empty else 0,
-            'unknown_countries': len(dim_countries[dim_countries['country_code'] == 'UNKNOWN']) if not dim_countries.empty else 0,
-            'total_years': len(dim_years) if not dim_years.empty else 0,
-            'total_operators': len(dim_operators) if not dim_operators.empty else 0,
-            'total_train_records': len(facts_night_trains) if not facts_night_trains.empty else 0,
-            'night_train_records': int(facts_night_trains['is_night'].eq(True).sum()) if not facts_night_trains.empty and 'is_night' in facts_night_trains.columns else 0,
-            'day_train_records': int(facts_night_trains['is_night'].eq(False).sum()) if not facts_night_trains.empty and 'is_night' in facts_night_trains.columns else 0,
-            'country_stats_records': len(facts_country_stats) if not facts_country_stats.empty else 0,
-            'dashboard_metrics_records': len(dashboard_metrics) if not dashboard_metrics.empty else 0,
-            'operator_dashboard_records': len(op_dash) if 'op_dash' in locals() and not op_dash.empty else 0
+        'data_quality':{
+            'total_countries':int(len(dim_countries)),
+            'total_years':int(len(dim_years)),
+            'total_operators':int(len(dim_operators)),
+            'total_stops':int(len(dim_stops)),
+            'total_train_records':int(total_trains),
+            'real_gtfs_records':int(real_gtfs_count),
+            'back_on_track_records':int(bot_count),
+            'synthetic_records':int(synthetic_verified),
+            'night_train_records':int(night),
+            'day_train_records':int(day),
+            'country_stats_records':int(len(facts_country_stats)),
+            'source_counts':source_counts,
+            'synthetic_by_country':synthetic_country_counts,
+            'gtfs_observed_counts':observed_counts,
+            'synthetic_density_factor':SYNTHETIC_DENSITY_FACTOR,
+            'synthetic_max_per_country_year':SYNTHETIC_MAX_PER_COUNTRY_YEAR,
         }
     }
-    
-    import json
-    with open(warehouse_path / "warehouse_schema_report.json", 'w', encoding='utf-8') as f:
-        json.dump(traceability_report, f, indent=2, ensure_ascii=False)
-    
-    return traceability_report
+    with (warehouse / 'warehouse_schema_report.json').open('w', encoding='utf-8') as handle:
+        json.dump(report, handle, indent=2, ensure_ascii=False)
+
+    logger.info(
+        "✅ Warehouse : %s trains (%s réels GTFS, %s BOT, %s synthétiques) | jour=%s nuit=%s",
+        f"{total_trains:,}", f"{real_gtfs_count:,}", f"{bot_count:,}", f"{synthetic_count:,}", f"{day:,}", f"{night:,}"
+    )
+    return report
