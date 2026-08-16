@@ -33,13 +33,16 @@ NETWORK_FEATURES = [
 
 
 def _safe_growth(current, previous):
-    current = pd.to_numeric(current, errors="coerce")
-    previous = pd.to_numeric(previous, errors="coerce")
-    denominator = previous.abs()
-    return np.where(
-        denominator > 1e-12,
-        (current - previous) / denominator,
-        0.0,
+    current_values, previous_values = np.broadcast_arrays(
+        np.asarray(pd.to_numeric(current, errors="coerce"), dtype=float),
+        np.asarray(pd.to_numeric(previous, errors="coerce"), dtype=float),
+    )
+    denominator = np.abs(previous_values)
+    return np.divide(
+        current_values - previous_values,
+        denominator,
+        out=np.zeros_like(current_values, dtype=float),
+        where=denominator > 1e-12,
     )
 
 

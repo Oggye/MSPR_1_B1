@@ -1,0 +1,12 @@
+# Dépendances minimales pour les tests unitaires IA et les contrats du routeur.
+numpy>=1.24.0
+pandas>=1.5.0
+scikit-learn>=1.3.0
+xgboost>=2.0.0
+joblib>=1.2.0
+fastapi==0.104.1
+pydantic==2.5.0
+sqlalchemy==2.0.23
+httpx==0.25.1
+pytest==7.4.3
+pytest-cov==4.1.0
