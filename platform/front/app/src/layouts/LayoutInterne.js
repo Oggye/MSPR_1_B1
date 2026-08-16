@@ -1,12 +1,15 @@
 import { Link, Outlet } from "react-router-dom";
+import { useAuth } from "../auth/AuthContext";
 
 const menuItems = [
   { path: "/interne/HomePage", label: "Supervision" },
   { path: "/externe/HomePage", label: "Espace externe" },
+  { path: "/ia", label: "IA" },
   { path: "/", label: "Accueil" },
 ];
 
 export default function LayoutInterne() {
+  const { user, logout } = useAuth();
   return (
     <div className="internal-shell">
       <aside className="internal-sidebar">
@@ -22,6 +25,11 @@ export default function LayoutInterne() {
             </Link>
           ))}
         </nav>
+        <div className="internal-nav">
+          <span>{user?.email}</span>
+          <small>Administrateur</small>
+          <button type="button" onClick={logout}>Déconnexion</button>
+        </div>
       </aside>
 
       <section className="internal-content">

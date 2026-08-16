@@ -1,11 +1,12 @@
 # app/main.py
 import logging
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import (
     analysis,
+    auth,
     countries,
     dashboard,
     internal,
@@ -14,6 +15,7 @@ from app.routers import (
     operators,
     statistics,
 )
+from app.security import require_admin, require_user
 
 logger = logging.getLogger(__name__)
 
@@ -57,17 +59,18 @@ app.add_middleware(
 )
 
 
-app.include_router(countries.router)
-app.include_router(night_trains.router)
-app.include_router(dashboard.router)
-app.include_router(analysis.router)
-app.include_router(operators.router)
-app.include_router(metadata.router)
-app.include_router(statistics.router)
-app.include_router(internal.router)
+app.include_router(auth.router)
+app.include_router(countries.router, dependencies=[Depends(require_user)])
+app.include_router(night_trains.router, dependencies=[Depends(require_user)])
+app.include_router(dashboard.router, dependencies=[Depends(require_user)])
+app.include_router(analysis.router, dependencies=[Depends(require_user)])
+app.include_router(operators.router, dependencies=[Depends(require_user)])
+app.include_router(metadata.router, dependencies=[Depends(require_user)])
+app.include_router(statistics.router, dependencies=[Depends(require_user)])
+app.include_router(internal.router, dependencies=[Depends(require_admin)])
 
 if predict is not None:
-    app.include_router(predict.router)
+    app.include_router(predict.router, dependencies=[Depends(require_user)])
 
 
 @app.get("/")

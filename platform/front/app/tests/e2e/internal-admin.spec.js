@@ -1,7 +1,12 @@
 const { test, expect } = require('@playwright/test');
+const { createAuthenticatedSession } = require('./auth');
 
 test.describe('Parcours frontend interne admin', () => {
   test.describe.configure({ mode: 'serial' });
+
+  test.beforeEach(async ({ page }) => {
+    await createAuthenticatedSession(page.context().request, 'admin');
+  });
 
   test('chargement dashboard interne et navigation tabs', async ({ page }) => {
     await page.goto('/interne/HomePage');

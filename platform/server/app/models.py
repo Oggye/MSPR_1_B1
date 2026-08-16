@@ -8,10 +8,34 @@ avec l'architecture historique. Le champ canonique d'un trajet est désormais
 sans tenter d'écrire dans la colonne PostgreSQL générée du même nom.
 """
 
-from sqlalchemy import BigInteger, Boolean, Column, DECIMAL, ForeignKey, Integer, String
+from datetime import datetime, timezone
+
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Column, DateTime, DECIMAL, ForeignKey, Integer, String
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
+
+
+class User(Base):
+    """Compte applicatif indépendant du warehouse ferroviaire."""
+
+    __tablename__ = "app_users"
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'admin')", name="ck_app_users_role"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    email = Column(String(320), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(10), nullable=False, default="user")
+    is_active = Column(Boolean, nullable=False, default=True)
+    terms_accepted_at = Column(DateTime(timezone=True), nullable=False)
+    legal_version = Column(String(20), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
 
 
 class DimCountries(Base):

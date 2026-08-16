@@ -99,6 +99,9 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
+      - ADMIN_SIGNUP_CODE=${ADMIN_SIGNUP_CODE}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-120}
       - PROMETHEUS_URL=http://prometheus:9090
       - GRAFANA_URL=http://grafana:3000
       - PYTHONPATH=/app

@@ -2,6 +2,7 @@ const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
     },
@@ -9,6 +10,7 @@ async function request(path, options = {}) {
   });
 
   if (!response.ok) {
+    if (response.status === 401) window.dispatchEvent(new Event("obrail:unauthorized"));
     throw new Error(`Erreur API ${response.status} sur ${path}`);
   }
 
@@ -29,7 +31,7 @@ export function runInternalTests() {
 
 export function streamInternalTests(onMessage, onError, onDone) {
   const streamUrl = `${API_BASE_URL}/api/internal/tests/stream`;
-  const source = new EventSource(streamUrl);
+  const source = new EventSource(streamUrl, { withCredentials: true });
   source.onmessage = (event) => {
     try {
       const payload = JSON.parse(event.data);
@@ -51,7 +53,7 @@ export function streamInternalTests(onMessage, onError, onDone) {
 
 export function streamInternalTestsCategory(category, onMessage, onError, onDone) {
   const streamUrl = `${API_BASE_URL}/api/internal/tests/stream/${category}`;
-  const source = new EventSource(streamUrl);
+  const source = new EventSource(streamUrl, { withCredentials: true });
   source.onmessage = (event) => {
     try {
       const payload = JSON.parse(event.data);

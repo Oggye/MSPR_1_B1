@@ -3,6 +3,7 @@ Configuration partagée pour les tests unitaires de l'API ObRail
 """
 # Note: Ce fichier est utilisé pour configurer les fixtures et les dépendances partagées entre les tests.
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 # Ajouter le chemin pour accéder à app/ depuis test/
@@ -23,6 +24,7 @@ from app.models import (
     DimCountries, DimYears, DimOperators,
     FactsCountryStats, FactsNightTrains, DashboardMetrics, OperatorDashboard
 )
+from app.security import require_admin, require_user
 
 # Configuration de la base de données de test
 SQLALCHEMY_DATABASE_URL = "sqlite:///:memory:"
@@ -61,8 +63,24 @@ def db_session(test_engine):
 
 @pytest.fixture(scope="function")
 def client():
-    """Client de test FastAPI"""
-    return TestClient(app)
+    """Client authentifié pour préserver les tests métier existants."""
+    previous_user = app.dependency_overrides.get(require_user)
+    previous_admin = app.dependency_overrides.get(require_admin)
+    user = SimpleNamespace(id=1, email="admin@test.invalid", role="admin", is_active=True)
+    app.dependency_overrides[require_user] = lambda: user
+    app.dependency_overrides[require_admin] = lambda: user
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        if previous_user is None:
+            app.dependency_overrides.pop(require_user, None)
+        else:
+            app.dependency_overrides[require_user] = previous_user
+        if previous_admin is None:
+            app.dependency_overrides.pop(require_admin, None)
+        else:
+            app.dependency_overrides[require_admin] = previous_admin
 
 @pytest.fixture(scope="function")
 def sample_data(db_session):

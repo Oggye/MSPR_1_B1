@@ -1,4 +1,5 @@
 const { test, expect } = require('@playwright/test');
+const { createAuthenticatedSession } = require('./auth');
 
 const API_BASE_URL =
   process.env.E2E_API_URL || 'http://localhost:8000';
@@ -66,6 +67,10 @@ test.describe(
   () => {
     test.describe.configure({
       mode: 'serial',
+    });
+
+    test.beforeEach(async ({ request }) => {
+      await createAuthenticatedSession(request, 'admin');
     });
 
     test(

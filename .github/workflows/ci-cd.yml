@@ -15,6 +15,9 @@ env:
   DB_USER: obrail_user
   DB_PASSWORD: ci_password
   JWT_SECRET: ci_only_secret
+  ADMIN_SIGNUP_CODE: "654321"
+  COOKIE_SECURE: "false"
+  E2E_ADMIN_CODE: "654321"
 
 concurrency:
   group: ci-cd-${{ github.ref }}
@@ -145,7 +148,7 @@ jobs:
             docker compose exec -T db pg_isready -U "$DB_USER" -d "$DB_NAME" >/dev/null \
               && curl -fsS http://localhost:3000/externe/HomePage >/dev/null \
               && curl -fsS http://localhost:8000/health >/dev/null \
-              && curl -fsS http://localhost:8000/api/night-trains/summary >/dev/null \
+              && curl -fsS http://localhost:8000/api/docs >/dev/null \
               && exit 0
             sleep 5
           done

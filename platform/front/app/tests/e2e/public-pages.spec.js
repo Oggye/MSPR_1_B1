@@ -1,6 +1,11 @@
 const { test, expect } = require('@playwright/test');
+const { createAuthenticatedSession } = require('./auth');
 
 test.describe('Parcours frontend externe', () => {
+  test.beforeEach(async ({ page }) => {
+    await createAuthenticatedSession(page.context().request, 'user');
+  });
+
   async function openMobileMenuIfNeeded(page) {
     const menuButton = page.getByRole('button', { name: /☰/ });
     if (await menuButton.isVisible()) {

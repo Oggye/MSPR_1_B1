@@ -8,6 +8,7 @@ const API_ROOT_URL = API_BASE_URL.replace(/\/api$/, '');
 
 const api = axios.create({
   baseURL: API_BASE_URL,
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -15,10 +16,21 @@ const api = axios.create({
 
 const rootApi = axios.create({
   baseURL: API_ROOT_URL,
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },
 });
+
+const handleUnauthorized = (error) => {
+  if (error?.response?.status === 401) {
+    window.dispatchEvent(new Event('obrail:unauthorized'));
+  }
+  return Promise.reject(error);
+};
+
+api.interceptors?.response?.use?.(response => response, handleUnauthorized);
+rootApi.interceptors?.response?.use?.(response => response, handleUnauthorized);
 
 const cleanParams = (params = {}) => Object.fromEntries(
   Object.entries(params).filter(([, value]) => (
