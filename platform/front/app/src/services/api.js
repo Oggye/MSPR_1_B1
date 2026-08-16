@@ -99,7 +99,6 @@ export const getGeographicCoverage = () => (
   api.get('/geographic/coverage')
 );
 
-// Compatibilité avec les anciens appels
 export const getAllTrains = getNightTrains;
 
 export const getTrainsByCountry = (
@@ -183,7 +182,11 @@ export const getOperatorTimeline = operatorId => (
 
 export const getOperatorById = getOperatorStats;
 
-// Prédictions IA
+// IA
+export const getPredictionContext = () => (
+  api.get('/predict/context')
+);
+
 export const predictClassification = payload => (
   api.post('/predict/classification', payload)
 );
@@ -192,7 +195,7 @@ export const predictRegression = payload => (
   api.post('/predict/regression', payload)
 );
 
-// Health est hors du préfixe /api
+// Health
 export const getHealth = () => rootApi.get('/health');
 
 export default api;

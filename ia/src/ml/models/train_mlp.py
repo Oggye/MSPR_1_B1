@@ -1,36 +1,57 @@
-# ia/src/ml/models/train_mlp.py
-# Axe Classification — MLP Classifier
-
 from sklearn.neural_network import MLPClassifier
+
 from .train_utils import (
-    load_classification_data, prepare_classification_data,
-    evaluate_classification, save_model_and_metrics
+    CLF_CATEGORICAL_FEATURES,
+    CLF_NUMERIC_FEATURES,
+    evaluate_classification,
+    fit_production_model,
+    load_classification_data,
+    prepare_classification_data,
+    save_model_and_metrics,
 )
 
 
 def train_mlp():
-    print("\n--- Classification : MLP (Neural Network) ---")
+    print("\n--- Classification : MLP ---")
 
     X, y = load_classification_data()
-    X_train, X_test, y_train, y_test, preprocessor = prepare_classification_data(X, y)
+    prepared = prepare_classification_data(X, y)
 
-    model = MLPClassifier(
+    evaluation_model = MLPClassifier(
         hidden_layer_sizes=(64, 32),
-        activation="relu",
-        solver="adam",
-        max_iter=500,
-        random_state=42,
+        alpha=0.001,
+        max_iter=1500,
         early_stopping=True,
-        validation_fraction=0.15
+        validation_fraction=0.15,
+        random_state=42,
     )
-    model.fit(X_train, y_train)
+    evaluation_model.fit(prepared.X_train, prepared.y_train)
 
-    metrics = evaluate_classification(model, X_test, y_test)
-    print("Métriques :")
-    for k, v in metrics.items():
-        print(f"  {k}: {v:.4f}" if v is not None else f"  {k}: N/A")
+    metrics = evaluate_classification(
+        evaluation_model,
+        prepared,
+    )
 
-    save_model_and_metrics(model, metrics, "mlp", axis="clf")
+    print("Métriques holdout temporel :")
+    for key, value in metrics.items():
+        if isinstance(value, float):
+            print(f"  {key}: {value:.4f}")
+
+    production_model, production_preprocessor = fit_production_model(
+        evaluation_model,
+        X,
+        y,
+        CLF_NUMERIC_FEATURES,
+        CLF_CATEGORICAL_FEATURES,
+    )
+
+    save_model_and_metrics(
+        production_model,
+        metrics,
+        "mlp",
+        preprocessor=production_preprocessor,
+        axis="clf",
+    )
 
 
 if __name__ == "__main__":

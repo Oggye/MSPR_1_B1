@@ -1,12 +1,18 @@
-# ia/src/ml/models/train_random_forest.py
-# Axe Classification — Random Forest
-# Axe Régression    — Random Forest Regressor
-
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+
 from .train_utils import (
-    load_classification_data, prepare_classification_data, evaluate_classification,
-    load_regression_data, prepare_regression_data, evaluate_regression,
-    save_model_and_metrics
+    CLF_CATEGORICAL_FEATURES,
+    CLF_NUMERIC_FEATURES,
+    REG_CATEGORICAL_FEATURES,
+    REG_NUMERIC_FEATURES,
+    evaluate_classification,
+    evaluate_regression,
+    fit_production_model,
+    load_classification_data,
+    load_regression_data,
+    prepare_classification_data,
+    prepare_regression_data,
+    save_model_and_metrics,
 )
 
 
@@ -14,43 +20,85 @@ def train_random_forest():
     print("\n--- Classification : Random Forest ---")
 
     X, y = load_classification_data()
-    X_train, X_test, y_train, y_test, preprocessor = prepare_classification_data(X, y)
+    prepared = prepare_classification_data(X, y)
 
-    model = RandomForestClassifier(
-        n_estimators=100,
+    evaluation_model = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=8,
+        min_samples_leaf=3,
+        class_weight="balanced",
         random_state=42,
         n_jobs=-1,
-        class_weight="balanced"
     )
-    model.fit(X_train, y_train)
+    evaluation_model.fit(prepared.X_train, prepared.y_train)
 
-    metrics = evaluate_classification(model, X_test, y_test)
-    print("Métriques classification :")
-    for k, v in metrics.items():
-        print(f"  {k}: {v:.4f}" if v is not None else f"  {k}: N/A")
+    metrics = evaluate_classification(
+        evaluation_model,
+        prepared,
+    )
 
-    save_model_and_metrics(model, metrics, "random_forest", axis="clf")
+    print("Métriques holdout temporel :")
+    for key, value in metrics.items():
+        if isinstance(value, float):
+            print(f"  {key}: {value:.4f}")
+
+    production_model, production_preprocessor = fit_production_model(
+        evaluation_model,
+        X,
+        y,
+        CLF_NUMERIC_FEATURES,
+        CLF_CATEGORICAL_FEATURES,
+    )
+
+    save_model_and_metrics(
+        production_model,
+        metrics,
+        "random_forest",
+        preprocessor=production_preprocessor,
+        axis="clf",
+    )
 
 
 def train_random_forest_regressor():
-    print("\n--- Régression : Random Forest Regressor ---")
+    print("\n--- Régression : Random Forest ---")
 
     X, y = load_regression_data()
-    X_train, X_test, y_train, y_test, preprocessor = prepare_regression_data(X, y)
+    prepared = prepare_regression_data(X, y)
 
-    model = RandomForestRegressor(
-        n_estimators=100,
+    evaluation_model = RandomForestRegressor(
+        n_estimators=300,
+        max_depth=10,
+        min_samples_leaf=2,
         random_state=42,
-        n_jobs=-1
+        n_jobs=-1,
     )
-    model.fit(X_train, y_train)
+    evaluation_model.fit(prepared.X_train, prepared.y_train)
 
-    metrics = evaluate_regression(model, X_test, y_test)
-    print("Métriques régression :")
-    for k, v in metrics.items():
-        print(f"  {k}: {v:.4f}")
+    metrics = evaluate_regression(
+        evaluation_model,
+        prepared,
+    )
 
-    save_model_and_metrics(model, metrics, "random_forest", preprocessor=preprocessor, axis="reg")
+    print("Métriques holdout temporel :")
+    for key, value in metrics.items():
+        if isinstance(value, float):
+            print(f"  {key}: {value:.4f}")
+
+    production_model, production_preprocessor = fit_production_model(
+        evaluation_model,
+        X,
+        y,
+        REG_NUMERIC_FEATURES,
+        REG_CATEGORICAL_FEATURES,
+    )
+
+    save_model_and_metrics(
+        production_model,
+        metrics,
+        "random_forest",
+        preprocessor=production_preprocessor,
+        axis="reg",
+    )
 
 
 if __name__ == "__main__":

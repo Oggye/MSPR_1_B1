@@ -1,267 +1,231 @@
-# ia/src/ml/predict.py
-#
-# Script de prédiction ObRail Europe — version améliorée
-#
-# Améliorations vs version initiale :
-#   - Cache LRU des artefacts (modèle + preprocesseur) : évite le rechargement disque
-#     à chaque appel depuis l'API (gain ~200-500ms/requête)
-#   - Fallback modèle optimisé → modèle de base (comportement initial conservé)
-#   - Logging structuré des prédictions pour traçabilité
-#   - Validation renforcée des features avant transformation
-#   - Messages d'erreur enrichis pour diagnostics
+from __future__ import annotations
 
-import argparse
 import json
 import logging
-import sys
 from functools import lru_cache
-from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[3]
-MODELS_DIR  = ROOT / "ia" / "models"
-DATA_ML_DIR = ROOT / "data" / "ml"
+from .config import (
+    FORECAST_CLASSIFIER_PATH,
+    FORECAST_MANIFEST_PATH,
+    FORECAST_REGRESSOR_PATH,
+    MAX_FORECAST_HORIZON,
+)
 
 logger = logging.getLogger("obrail.ml.predict")
 
 
-# ---------------------------------------------------------------------------
-# Résolution des chemins avec fallback
-# ---------------------------------------------------------------------------
-
-def _resolve_model_path(axis: str) -> tuple[Path, Path]:
-    """
-    Résout les chemins du modèle et du preprocesseur pour un axe donné.
-    Priorité : modèle optimisé → modèle de base.
-    Lève FileNotFoundError avec un message clair si aucun n'est trouvable.
-    """
-    if axis == "classification":
-        candidates = [
-            MODELS_DIR / "xgboost_optimized_clf.joblib",
-            MODELS_DIR / "xgboost_clf.joblib",
-        ]
-        prep_path = DATA_ML_DIR / "preprocessor_classification.joblib"
-    else:
-        candidates = [
-            MODELS_DIR / "ridge_optimized_reg.joblib",
-            MODELS_DIR / "ridge_reg.joblib",
-        ]
-        prep_path = DATA_ML_DIR / "preprocessor_regression.joblib"
-
-    model_path = next((p for p in candidates if p.exists()), None)
-
-    if model_path is None:
-        tried = ", ".join(str(p) for p in candidates)
-        raise FileNotFoundError(
-            f"Aucun modèle trouvé pour l'axe '{axis}'. "
-            f"Fichiers cherchés : {tried}. "
-            f"Lancez d'abord run_training.py (et optionnellement optimize_xgboost_ridge.py)."
-        )
-
-    if not prep_path.exists():
-        raise FileNotFoundError(
-            f"Preprocesseur introuvable : {prep_path}. "
-            f"Lancez d'abord run_training.py."
-        )
-
-    return model_path, prep_path
-
-
-# ---------------------------------------------------------------------------
-# Cache des artefacts — chargement unique en mémoire
-# ---------------------------------------------------------------------------
-
-@lru_cache(maxsize=4)
-def _load_artifacts_cached(model_path_str: str, prep_path_str: str):
-    """
-    Charge et met en cache le modèle et le preprocesseur.
-    Le cache est indexé par les chemins de fichiers (strings, hashable).
-    Utiliser des strings plutôt que des Path objects (non-hashable par lru_cache).
-    """
-    model_path = Path(model_path_str)
-    prep_path  = Path(prep_path_str)
-
-    logger.info(f"Chargement du modèle depuis : {model_path.name}")
-    model = joblib.load(model_path)
-    preprocessor = joblib.load(prep_path)
-    logger.info(f"Modèle chargé et mis en cache : {model_path.name}")
-
-    return model, preprocessor
-
-
-def load_artifacts(axis: str):
-    """
-    Retourne (model, preprocessor) depuis le cache ou depuis le disque.
-    Premier appel : charge depuis le disque (~300ms).
-    Appels suivants : retourne depuis le cache mémoire (~0ms).
-    """
-    model_path, prep_path = _resolve_model_path(axis)
-    return _load_artifacts_cached(str(model_path), str(prep_path))
-
-
-# ---------------------------------------------------------------------------
-# Features attendues par axe (doit correspondre à train_utils.py)
-# ---------------------------------------------------------------------------
-
-EXPECTED_FEATURES = [
-    "year",
-    "co2_emissions",
-    "co2_per_passenger",
-    "co2_lag1",
-    "passengers_lag1",
-    "passengers_lag2",
-    "country_name",
-]
-
-
-def _build_input_df(
-    country: str,
-    year: int,
-    co2_emissions: float,
-    co2_per_passenger: float,
-    co2_lag1: float,
-    passengers_lag1: float,
-    passengers_lag2: float,
-) -> pd.DataFrame:
-    """Construit et valide le DataFrame d'entrée."""
-    row = {
-        "year": year,
-        "co2_emissions": co2_emissions,
-        "co2_per_passenger": co2_per_passenger,
-        "co2_lag1": co2_lag1,
-        "passengers_lag1": passengers_lag1,
-        "passengers_lag2": passengers_lag2,
-        "country_name": country,
-    }
-    df = pd.DataFrame([row])
-    # Vérification de cohérence
-    missing = [f for f in EXPECTED_FEATURES if f not in df.columns]
+@lru_cache(maxsize=1)
+def load_artifacts():
+    required = [
+        FORECAST_CLASSIFIER_PATH,
+        FORECAST_REGRESSOR_PATH,
+        FORECAST_MANIFEST_PATH,
+    ]
+    missing = [str(path) for path in required if not path.exists()]
     if missing:
-        raise ValueError(f"Features manquantes dans le DataFrame d'entrée : {missing}")
-    return df
+        raise FileNotFoundError(
+            "Artefacts multi-horizon manquants : "
+            + ", ".join(missing)
+        )
+
+    classifier = joblib.load(FORECAST_CLASSIFIER_PATH)
+    regressor = joblib.load(FORECAST_REGRESSOR_PATH)
+    manifest = json.loads(
+        FORECAST_MANIFEST_PATH.read_text(encoding="utf-8")
+    )
+
+    return classifier, regressor, manifest
 
 
-# ---------------------------------------------------------------------------
-# Fonction de prédiction principale
-# ---------------------------------------------------------------------------
+def _growth(current: float, previous: float) -> float:
+    if abs(previous) <= 1e-12:
+        return 0.0
+    return (current - previous) / abs(previous)
+
+
+def _build_row(
+    *,
+    country: str,
+    horizon: int,
+    passengers_current: float,
+    passengers_previous: float,
+    co2_current: float,
+    co2_previous: float,
+    train_count_current: float,
+    night_share_current: float,
+    real_share_current: float,
+    avg_distance_current: float,
+    avg_duration_current: float,
+    operator_count_current: float,
+    network_data_available: int,
+):
+    return pd.DataFrame(
+        [
+            {
+                "country_name": country,
+                "horizon": int(horizon),
+                "passengers": float(passengers_current),
+                "passengers_previous": float(passengers_previous),
+                "passenger_growth_1y": _growth(
+                    passengers_current,
+                    passengers_previous,
+                ),
+                "co2_emissions": float(co2_current),
+                "co2_previous": float(co2_previous),
+                "co2_growth_1y": _growth(
+                    co2_current,
+                    co2_previous,
+                ),
+                "train_count_current": float(train_count_current),
+                "night_share_current": float(night_share_current),
+                "real_share_current": float(real_share_current),
+                "avg_distance_current": float(avg_distance_current),
+                "avg_duration_current": float(avg_duration_current),
+                "operator_count_current": float(operator_count_current),
+                "network_data_available": int(network_data_available),
+            }
+        ]
+    )
+
+
+def _baseline_prediction(
+    mode: str,
+    horizon: int,
+    passengers_current: float,
+    passengers_previous: float,
+):
+    if mode == "linear_trend":
+        value = (
+            passengers_current
+            + horizon * (
+                passengers_current - passengers_previous
+            )
+        )
+        return max(0.0, float(value))
+
+    return max(0.0, float(passengers_current))
+
 
 def predict(
-    axis: str,
+    *,
     country: str,
-    year: int,
-    co2_emissions: float,
-    co2_per_passenger: float,
-    co2_lag1: float,
-    passengers_lag1: float,
-    passengers_lag2: float,
-) -> dict:
-    """
-    Point d'entrée unique pour toutes les prédictions ObRail.
-
-    Parameters
-    ----------
-    axis : "classification" | "regression"
-    country : nom du pays (doit correspondre au référentiel d'entraînement)
-    year : année de prédiction (>= 2013)
-    co2_emissions : émissions CO₂ totales (kt)
-    co2_per_passenger : émissions CO₂ / passager (kg)
-    co2_lag1 : co2_per_passenger année N-1
-    passengers_lag1 : passagers année N-1 (k)
-    passengers_lag2 : passagers année N-2 (k)
-
-    Returns
-    -------
-    dict avec les clés : axis, country, year, prediction, label, [probability]
-    """
-    if axis not in ("classification", "regression"):
-        raise ValueError(f"Axe invalide : '{axis}'. Valeurs acceptées : classification, regression.")
-
-    model, preprocessor = load_artifacts(axis)
-    input_df = _build_input_df(
-        country, year, co2_emissions, co2_per_passenger,
-        co2_lag1, passengers_lag1, passengers_lag2,
-    )
-
-    X = preprocessor.transform(input_df)
-    result = {"axis": axis, "country": country, "year": year}
-
-    if axis == "classification":
-        pred = int(model.predict(X)[0])
-        result["prediction"] = pred
-        result["label"] = "En déclin" if pred == 1 else "En croissance"
-        if hasattr(model, "predict_proba"):
-            proba = model.predict_proba(X)[0]
-            result["probability"] = round(float(proba[1]), 4)
-        else:
-            result["probability"] = None
-    else:
-        pred = float(model.predict(X)[0])
-        result["prediction"] = round(pred, 2)
-        result["label"] = f"{max(0, round(pred)):,} milliers de passagers prévus"
-
-    logger.debug(
-        f"[{axis.upper()}] {country} {year} → {result['prediction']} "
-        f"({result.get('label', '')})"
-    )
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Interface CLI (usage standalone ou tests)
-# ---------------------------------------------------------------------------
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="ObRail Europe — Script de prédiction ML",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Exemples :
-  python -m ia.src.ml.predict --axis classification --country France --year 2024 \\
-    --co2_emissions 24800 --co2_per_passenger 1.75 --co2_lag1 25100 \\
-    --passengers_lag1 88000 --passengers_lag2 86500
-
-  python -m ia.src.ml.predict --axis regression --country Germany --year 2025 \\
-    --co2_emissions 32000 --co2_per_passenger 1.60 --co2_lag1 31500 \\
-    --passengers_lag1 120000 --passengers_lag2 118000 --json
-        """,
-    )
-    parser.add_argument("--axis", choices=["classification", "regression"], required=True)
-    parser.add_argument("--country", required=True)
-    parser.add_argument("--year", type=int, required=True)
-    parser.add_argument("--co2_emissions", type=float, required=True)
-    parser.add_argument("--co2_per_passenger", type=float, required=True)
-    parser.add_argument("--co2_lag1", type=float, required=True)
-    parser.add_argument("--passengers_lag1", type=float, required=True)
-    parser.add_argument("--passengers_lag2", type=float, required=True)
-    parser.add_argument("--json", action="store_true", help="Sortie en format JSON brut")
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.WARNING)  # Silencieux en CLI sauf erreurs
-
-    try:
-        result = predict(
-            args.axis, args.country, args.year,
-            args.co2_emissions, args.co2_per_passenger,
-            args.co2_lag1, args.passengers_lag1, args.passengers_lag2,
+    horizon: int,
+    passengers_current: float,
+    passengers_previous: float,
+    co2_current: float,
+    co2_previous: float,
+    train_count_current: float = 0.0,
+    night_share_current: float = 0.0,
+    real_share_current: float = 0.0,
+    avg_distance_current: float = 0.0,
+    avg_duration_current: float = 0.0,
+    operator_count_current: float = 0.0,
+    network_data_available: int = 0,
+):
+    if horizon < 1 or horizon > MAX_FORECAST_HORIZON:
+        raise ValueError(
+            f"Horizon invalide : {horizon}. "
+            f"Valeurs autorisées : 1 à {MAX_FORECAST_HORIZON}."
         )
-    except FileNotFoundError as e:
-        print(f"\n❌ Modèle introuvable : {e}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"\n❌ Erreur : {e}", file=sys.stderr)
-        sys.exit(1)
 
-    if args.json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+    classifier, regressor, manifest = load_artifacts()
+
+    X = _build_row(
+        country=country,
+        horizon=horizon,
+        passengers_current=passengers_current,
+        passengers_previous=passengers_previous,
+        co2_current=co2_current,
+        co2_previous=co2_previous,
+        train_count_current=train_count_current,
+        night_share_current=night_share_current,
+        real_share_current=real_share_current,
+        avg_distance_current=avg_distance_current,
+        avg_duration_current=avg_duration_current,
+        operator_count_current=operator_count_current,
+        network_data_available=network_data_available,
+    )
+
+    class_pred = int(classifier.predict(X)[0])
+
+    if hasattr(classifier, "predict_proba"):
+        decline_probability = float(
+            classifier.predict_proba(X)[0][1]
+        )
     else:
-        print(f"\n[{result['axis'].upper()}] {result['country']} — {result['year']}")
-        print(f"  Prédiction    : {result['prediction']}")
-        print(f"  Interprétation: {result['label']}")
-        if result.get("probability") is not None:
-            print(f"  Probabilité   : {result['probability']:.1%}")
+        decline_probability = float(class_pred)
 
+    ml_regression = max(
+        0.0,
+        float(regressor.predict(X)[0]),
+    )
 
-if __name__ == "__main__":
-    main()
+    regression_cfg = manifest["regression"]
+    baseline = _baseline_prediction(
+        regression_cfg["selected_baseline"],
+        horizon,
+        passengers_current,
+        passengers_previous,
+    )
+
+    ml_weight = float(
+        regression_cfg["blend_weight_ml"]
+    )
+    final_prediction = (
+        ml_weight * ml_regression
+        + (1.0 - ml_weight) * baseline
+    )
+    final_prediction = max(0.0, float(final_prediction))
+
+    q90 = float(
+        regression_cfg[
+            "final_holdout"
+        ][
+            "interval_q90_by_horizon"
+        ].get(str(horizon), 0.0)
+    )
+
+    interval_low = max(0.0, final_prediction - q90)
+    interval_high = final_prediction + q90
+
+    logger.info(
+        "[FORECAST] %s horizon=%s | clf=%s proba=%.3f | "
+        "reg=%.2f [%0.2f, %.2f]",
+        country,
+        horizon,
+        class_pred,
+        decline_probability,
+        final_prediction,
+        interval_low,
+        interval_high,
+    )
+
+    return {
+        "classification": {
+            "prediction": class_pred,
+            "label": (
+                "Baisse probable"
+                if class_pred == 1
+                else "Croissance / stabilité probable"
+            ),
+            "probability_decline": decline_probability,
+            "model": manifest["classification"]["selected_model"],
+        },
+        "regression": {
+            "prediction": final_prediction,
+            "interval_low": interval_low,
+            "interval_high": interval_high,
+            "interval_level": 0.90,
+            "ml_prediction": ml_regression,
+            "baseline_prediction": baseline,
+            "blend_weight_ml": ml_weight,
+            "model": regression_cfg["selected_model"],
+            "baseline": regression_cfg["selected_baseline"],
+        },
+        "horizon": int(horizon),
+        "manifest_version": manifest.get("version", 3),
+    }
