@@ -7,34 +7,39 @@ from app.routers import metadata
 
 
 def test_quality_report_uses_file_when_available(tmp_path, monkeypatch):
-    routers_dir = tmp_path / "platform" / "server" / "app" / "routers"
-    reports_dir = tmp_path / "platform" / "server" / "app" / "reports"
-    reports_dir.mkdir(parents=True)
-    routers_dir.mkdir(parents=True)
-
+    report_path = tmp_path / "quality_reports.json"
     report = {"execution_date": "2026-01-01", "project": "test", "summary": {"success": True}}
-    (reports_dir / "quality_reports.json").write_text(json.dumps(report), encoding="utf-8")
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    monkeypatch.setattr(metadata, "_quality_report_candidates", lambda: [report_path])
 
-    monkeypatch.setattr(metadata.os.path, "abspath", lambda _: str(routers_dir / "metadata.py"))
+    result = metadata.get_quality_report()
 
-    assert metadata.get_quality_report() == report
+    assert result["execution_date"] == report["execution_date"]
+    assert result["project"] == report["project"]
+    assert result["summary"] == report["summary"]
+    assert result["metadata_report_source"] == str(report_path)
+    assert result["metadata_report_available"] is True
 
 
 def test_quality_report_returns_default_when_file_is_missing(tmp_path, monkeypatch):
-    routers_dir = tmp_path / "platform" / "server" / "app" / "routers"
-    routers_dir.mkdir(parents=True)
-
-    monkeypatch.setattr(metadata.os.path, "abspath", lambda _: str(routers_dir / "metadata.py"))
+    monkeypatch.setattr(
+        metadata,
+        "_quality_report_candidates",
+        lambda: [tmp_path / "missing.json"],
+    )
 
     result = metadata.get_quality_report()
 
     assert result["project"].startswith("ObRail")
-    assert result["summary"]["success"] is True
-    assert len(result["data_sources"]) >= 1
+    assert result["summary"]["success"] is False
+    assert result["summary"]["reason"] == "quality_report_missing"
+    assert result["metadata_report_available"] is False
 
 
-def test_quality_report_wraps_unexpected_errors(monkeypatch):
-    monkeypatch.setattr(metadata.os.path, "dirname", lambda _: (_ for _ in ()).throw(RuntimeError("boom")))
+def test_quality_report_wraps_unreadable_json(tmp_path, monkeypatch):
+    report_path = tmp_path / "quality_reports.json"
+    report_path.write_text("not valid JSON", encoding="utf-8")
+    monkeypatch.setattr(metadata, "_quality_report_candidates", lambda: [report_path])
 
     with pytest.raises(HTTPException) as exc:
         metadata.get_quality_report()

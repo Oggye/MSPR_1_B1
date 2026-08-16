@@ -10,6 +10,12 @@ on:
 permissions:
   contents: read
 
+env:
+  DB_NAME: obrail
+  DB_USER: obrail_user
+  DB_PASSWORD: ci_password
+  JWT_SECRET: ci_only_secret
+
 concurrency:
   group: ci-cd-${{ github.ref }}
   cancel-in-progress: true
@@ -52,6 +58,9 @@ jobs:
     name: IA Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      PYTHONPATH: .:platform/server
+      DATABASE_URL: "sqlite:///:memory:"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,9 +76,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.ia-test.txt
-
-      - name: Set PYTHONPATH
-        run: echo "PYTHONPATH=.:platform/server" >> $GITHUB_ENV
 
       - name: Check IA syntax and imports
         run: |
@@ -109,17 +115,44 @@ jobs:
         working-directory: platform/front/app
 
       - name: Start docker services for E2E
-        run: docker compose up -d db api front prometheus grafana loki promtail
+        run: |
+          set -euo pipefail
+
+          if ! docker compose up -d db prometheus loki grafana; then
+            set +e
+            docker compose ps
+            docker compose logs --tail=200
+            exit 1
+          fi
+
+          if ! docker compose up -d --build --no-deps api; then
+            set +e
+            docker compose ps
+            docker compose logs api --tail=200
+            exit 1
+          fi
+
+          if ! docker compose up -d --build --no-deps front; then
+            set +e
+            docker compose ps
+            docker compose logs api front --tail=200
+            exit 1
+          fi
 
       - name: Wait for frontend and API
         run: |
           for i in {1..60}; do
-            curl -fsS http://localhost:3000/externe/HomePage >/dev/null && curl -fsS http://localhost:8000/health >/dev/null && exit 0
+            docker compose exec -T db pg_isready -U "$DB_USER" -d "$DB_NAME" >/dev/null \
+              && curl -fsS http://localhost:3000/externe/HomePage >/dev/null \
+              && curl -fsS http://localhost:8000/health >/dev/null \
+              && curl -fsS http://localhost:8000/api/night-trains/summary >/dev/null \
+              && exit 0
             sleep 5
           done
           echo "Services not ready in time"
+          set +e
           docker compose ps
-          docker compose logs --tail=200
+          docker compose logs api front --tail=200
           exit 1
 
       - name: Run Playwright E2E
@@ -160,7 +193,6 @@ jobs:
         run: |
           pip install flake8
           flake8 platform/server/app --max-line-length=120 --ignore=E501,W503 --count
-        continue-on-error: true
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -176,9 +208,8 @@ jobs:
       - name: Run ESLint
         run: npx eslint src --ext .js,.jsx --max-warnings=50
         working-directory: platform/front/app
-        continue-on-error: true
 
-      - name: Run Prettier
+      - name: Run Prettier (advisory)
         run: npx prettier --check src
         working-directory: platform/front/app
         continue-on-error: true
@@ -194,7 +225,8 @@ jobs:
       always() &&
       needs.backend-tests.result == 'success' &&
       needs.ia-tests.result == 'success' &&
-      needs.frontend-tests.result == 'success'
+      needs.frontend-tests.result == 'success' &&
+      needs.code-quality.result == 'success'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -231,42 +263,29 @@ jobs:
         run: |
           set -euo pipefail
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          SHA="${{ github.sha }}"
-          
-          # Find images
-          FRONT_ID=$(docker image ls -q mspr_1_b3-front | head -1)
-          API_ID=$(docker image ls -q mspr_1_b3-api | head -1)
-          ETL_ID=$(docker image ls -q mspr_1_b3-etl | head -1)
-          
-          if [ -z "$FRONT_ID" ] || [ -z "$API_ID" ] || [ -z "$ETL_ID" ]; then
-            echo "ERROR: Image not found"
-            docker image ls
-            exit 1
-          fi
-          
-          # Tag images
-          docker tag $FRONT_ID ghcr.io/$OWNER/mspr_1_b3-front:latest
-          docker tag $API_ID ghcr.io/$OWNER/mspr_1_b3-api:latest
-          docker tag $ETL_ID ghcr.io/$OWNER/mspr_1_b3-etl:latest
-          
-          # Push
-          docker push ghcr.io/$OWNER/mspr_1_b3-front:latest
-          docker push ghcr.io/$OWNER/mspr_1_b3-api:latest
-          docker push ghcr.io/$OWNER/mspr_1_b3-etl:latest
+
+          for SERVICE in front api etl ia; do
+            IMAGE_ID=$(docker compose images -q "$SERVICE" | head -1)
+            if [ -z "$IMAGE_ID" ]; then
+              echo "ERROR: image missing for Compose service '$SERVICE'"
+              docker compose images
+              exit 1
+            fi
+
+            TARGET="ghcr.io/$OWNER/mspr_1_b3-$SERVICE:latest"
+            docker tag "$IMAGE_ID" "$TARGET"
+            docker push "$TARGET"
+          done
 
 
   deploy:
+    name: Container Smoke Test
     needs: [docker-push]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Créer fichier .env
-        run: |
-          echo "DB_URL=${{ secrets.DB_URL }}" >> .env
-          echo "API_KEY=${{ secrets.API_KEY }}" >> .env
 
       - name: Démarrer les services
         run: docker compose up -d db api front
@@ -278,4 +297,5 @@ jobs:
           docker compose logs api --tail=20
 
       - name: Arrêter les services
+        if: always()
         run: docker compose down

@@ -5,7 +5,6 @@ import sys
 from shutil import which
 from datetime import datetime
 from pathlib import Path
-from urllib.error import URLError
 from urllib.request import Request, urlopen
 from threading import Lock
 
@@ -447,7 +446,7 @@ def stream_tests_category(category: str):
     front_root = PROJECT_ROOT / "platform" / "front" / "app"
     if not test_root.exists():
         test_root = Path("/app/test")
-    
+
     if not front_root.exists():
         front_root = Path("/app/frontend")
 

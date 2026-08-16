@@ -18,7 +18,7 @@ def test_timeline_logic():
     #  Mock de la 2ème requête (night trains)
     night_query_mock = MagicMock()
     night_query_mock.join.return_value.group_by.return_value.order_by.return_value.all.return_value = [
-        (2024, 10)
+        (2024, 10, 6, 4)
     ]
 
     #  IMPORTANT : 2 appels à db.query()
@@ -40,7 +40,7 @@ def test_co2_ranking_logic():
     db = MagicMock()
 
     ranking_mock = MagicMock()
-    ranking_mock.order_by.return_value.limit.return_value.all.return_value = [
+    ranking_mock.filter.return_value.order_by.return_value.limit.return_value.all.return_value = [
         ("France", "FR", 0.03)
     ]
 
@@ -62,7 +62,7 @@ def test_co2_ranking_empty():
     db = MagicMock()
 
     ranking_mock = MagicMock()
-    ranking_mock.order_by.return_value.limit.return_value.all.return_value = []
+    ranking_mock.filter.return_value.order_by.return_value.all.return_value = []
 
     db.query.return_value = ranking_mock
 
