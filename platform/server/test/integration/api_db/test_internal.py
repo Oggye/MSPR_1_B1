@@ -8,6 +8,7 @@ class TestInternalEndpoints:
         monkeypatch.setattr(internal, "_prometheus_vector", lambda query: [])
         monkeypatch.setattr(internal, "_docker_status", lambda: {"available": False, "success": False, "services": []})
         monkeypatch.setattr(internal, "_reports_summary", lambda: {"quality": {}, "diagnostic": None})
+        monkeypatch.setattr(internal, "_ia_summary", lambda: {"available": False, "status": "unavailable"})
 
         response = client.get("/api/internal/overview")
 
@@ -18,6 +19,7 @@ class TestInternalEndpoints:
         assert "prometheus" in data
         assert "grafana" in data
         assert "docker" in data
+        assert data["ia"] == {"available": False, "status": "unavailable"}
 
     def test_internal_diagnostic_reports_missing_script(self, client, monkeypatch):
         monkeypatch.setattr(internal.Path, "exists", lambda self: False)

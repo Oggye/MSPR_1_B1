@@ -24,6 +24,10 @@ DIAGNOSTIC_REPORTS = [
     PROJECT_ROOT / "data" / "audit" / "diagnostic_report.json",
     Path("/app/data/audit/diagnostic_report.json"),
 ]
+IA_MODELS_DIR = PROJECT_ROOT / "ia" / "models"
+IA_MANIFEST = IA_MODELS_DIR / "forecast_manifest.json"
+IA_CLASSIFIER = IA_MODELS_DIR / "forecast_classifier.joblib"
+IA_REGRESSOR = IA_MODELS_DIR / "forecast_regressor.joblib"
 
 PROMETHEUS_URLS = [
     os.getenv("PROMETHEUS_URL", "http://prometheus:9090"),
@@ -289,6 +293,72 @@ def _reports_summary():
     return {"quality": quality, "diagnostic": diagnostic}
 
 
+def _ia_summary():
+    artifacts = {
+        "manifest": False,
+        "classifier": False,
+        "regressor": False,
+    }
+    try:
+        artifacts = {
+            "manifest": IA_MANIFEST.exists(),
+            "classifier": IA_CLASSIFIER.exists(),
+            "regressor": IA_REGRESSOR.exists(),
+        }
+        if not artifacts["manifest"]:
+            return {
+                "available": False,
+                "status": "unavailable",
+                "artifacts": artifacts,
+                "error": "Manifest IA introuvable",
+            }
+
+        manifest = json.loads(IA_MANIFEST.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict):
+            raise ValueError("Le manifest IA doit etre un objet JSON")
+
+        classification = manifest.get("classification", {})
+        regression = manifest.get("regression", {})
+        units = manifest.get("units", {})
+        classification = classification if isinstance(classification, dict) else {}
+        regression = regression if isinstance(regression, dict) else {}
+        units = units if isinstance(units, dict) else {}
+        classification_holdout = classification.get("final_holdout", {})
+        regression_holdout = regression.get("final_holdout", {})
+        classification_holdout = classification_holdout if isinstance(classification_holdout, dict) else {}
+        regression_holdout = regression_holdout if isinstance(regression_holdout, dict) else {}
+
+        return {
+            "available": True,
+            "status": "healthy" if all(artifacts.values()) else "degraded",
+            "version": manifest.get("version"),
+            "architecture": manifest.get("architecture"),
+            "horizons": manifest.get("forecast_horizons", []),
+            "last_updated": datetime.fromtimestamp(IA_MANIFEST.stat().st_mtime).isoformat(timespec="seconds"),
+            "artifacts": artifacts,
+            "classification": {
+                "model": classification.get("selected_model"),
+                "overall": classification_holdout.get("overall", {}),
+                "by_horizon": classification_holdout.get("by_horizon", {}),
+            },
+            "regression": {
+                "model": regression.get("selected_model"),
+                "baseline": regression.get("selected_baseline"),
+                "unit": units.get("passengers"),
+                "overall": regression_holdout.get("overall", {}),
+                "baseline_metrics": regression_holdout.get("baseline_only", {}),
+                "by_horizon": regression_holdout.get("by_horizon", {}),
+            },
+        }
+    except Exception:
+        return {
+            "available": False,
+            "status": "error",
+            "artifacts": artifacts,
+            "error": "Impossible de lire le manifest IA",
+        }
+
+
 @router.get("/overview")
 def get_internal_overview():
     health = {"status": "ok", "checked_at": _now()}
@@ -328,6 +398,7 @@ def get_internal_overview():
         "ci_cd": _github_actions_status(),
         "db_totals": _db_totals(),
         "reports": reports,
+        "ia": _ia_summary(),
     }
 
 
