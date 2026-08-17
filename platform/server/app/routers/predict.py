@@ -14,6 +14,10 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_db
+from app.model_monitoring import (
+    record_inference_error,
+    record_inference_success,
+)
 from app.models import (
     DimCountries,
     DimYears,
@@ -634,6 +638,10 @@ def predict_classification(
             1,
         )
     except FileNotFoundError as exc:
+        record_inference_error(
+            "classification",
+            context.horizon,
+        )
         raise HTTPException(
             status_code=503,
             detail={
@@ -643,6 +651,10 @@ def predict_classification(
         ) from exc
     except Exception as exc:
         logger.exception("Erreur classification multi-horizon")
+        record_inference_error(
+            "classification",
+            context.horizon,
+        )
         raise HTTPException(
             status_code=500,
             detail={
@@ -654,6 +666,13 @@ def predict_classification(
     clf = raw["classification"]
     probability = float(clf["probability_decline"])
     prediction = int(clf["prediction"])
+
+    record_inference_success(
+        "classification",
+        context.horizon,
+        inference_ms,
+        clf["label"],
+    )
 
     risk_level, risk_description = _risk_level(
         probability
@@ -742,6 +761,10 @@ def predict_regression(
             1,
         )
     except FileNotFoundError as exc:
+        record_inference_error(
+            "regression",
+            context.horizon,
+        )
         raise HTTPException(
             status_code=503,
             detail={
@@ -751,6 +774,10 @@ def predict_regression(
         ) from exc
     except Exception as exc:
         logger.exception("Erreur régression multi-horizon")
+        record_inference_error(
+            "regression",
+            context.horizon,
+        )
         raise HTTPException(
             status_code=500,
             detail={
@@ -770,6 +797,13 @@ def predict_regression(
         context.passengers_current,
     )
     label = _trend_label(trend_vs_origin)
+
+    record_inference_success(
+        "regression",
+        context.horizon,
+        inference_ms,
+        label,
+    )
 
     manifest = _manifest()
     regression_manifest = manifest["regression"]

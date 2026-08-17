@@ -400,6 +400,21 @@ th {
   color: #17202a;
 }
 
+.ia-section {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid #e5ebf1;
+}
+
+.ia-section h4 {
+  margin: 14px 0 0;
+  color: #12263a;
+}
+
+.ia-runtime-distributions {
+  margin: 20px 0;
+}
+
 .text-block {
   line-height: 1.6;
 }

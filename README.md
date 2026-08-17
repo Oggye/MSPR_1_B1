@@ -204,7 +204,7 @@ La stack de supervision est provisionnée automatiquement au démarrage. Les das
 monitoring/grafana/dashboards/
 ```
 
-Métriques surveillées : latence, taux d'erreur, temps d'inférence, distribution des prédictions (ratio déclin/croissance), data drift, model drift.
+Métriques surveillées : trafic et latence HTTP, erreurs API, nombre et erreurs de prédictions IA, temps d'inférence et distribution des classifications/tendances de régression. La détection automatique du data drift et l'évaluation du model drift avec de nouvelles vérités terrain restent des perspectives d'évolution.
 
 ---
 

@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import subprocess
 import sys
@@ -359,6 +360,83 @@ def _ia_summary():
         }
 
 
+def _ia_runtime_summary():
+    unavailable = {
+        "available": False,
+        "status": "unavailable",
+        "predictions_success": None,
+        "predictions_error": None,
+        "latency_p95_seconds": None,
+        "classification": {"total": 0, "distribution": {}},
+        "regression": {"total": 0, "distribution": {}},
+    }
+
+    try:
+        predictions_success = _prometheus_query(
+            'sum(obrail_ai_predictions_total{status="success"})'
+        )
+        predictions_error = _prometheus_query(
+            'sum(obrail_ai_predictions_total{status="error"})'
+        )
+        if predictions_success is None or predictions_error is None:
+            return unavailable
+
+        latency_p95 = _prometheus_query(
+            "histogram_quantile(0.95, "
+            "sum(rate(obrail_ai_inference_seconds_bucket[5m])) by (le))"
+        )
+        if latency_p95 is not None and not math.isfinite(latency_p95):
+            latency_p95 = None
+
+        classification_rows = _prometheus_vector(
+            "sum(obrail_ai_classification_results_total) by (label)"
+        )
+        regression_rows = _prometheus_vector(
+            "sum(obrail_ai_regression_results_total) by (trend)"
+        )
+        classification_distribution = {
+            row["metric"]["label"]: row["value"]
+            for row in classification_rows
+            if row.get("metric", {}).get("label")
+        }
+        regression_distribution = {
+            row["metric"]["trend"]: row["value"]
+            for row in regression_rows
+            if row.get("metric", {}).get("trend")
+        }
+
+        recent_errors = _prometheus_query(
+            'sum(increase(obrail_ai_predictions_total{status="error"}[5m]))'
+        )
+        predictions_observed = predictions_success + predictions_error
+        if predictions_observed <= 0:
+            status = "no_data"
+        elif recent_errors is not None and recent_errors > 0:
+            status = "incident"
+        elif latency_p95 is not None and latency_p95 > 1:
+            status = "warning"
+        else:
+            status = "healthy"
+
+        return {
+            "available": True,
+            "status": status,
+            "predictions_success": predictions_success,
+            "predictions_error": predictions_error,
+            "latency_p95_seconds": latency_p95,
+            "classification": {
+                "total": sum(classification_distribution.values()),
+                "distribution": classification_distribution,
+            },
+            "regression": {
+                "total": sum(regression_distribution.values()),
+                "distribution": regression_distribution,
+            },
+        }
+    except Exception:
+        return unavailable
+
+
 @router.get("/overview")
 def get_internal_overview():
     health = {"status": "ok", "checked_at": _now()}
@@ -368,6 +446,8 @@ def get_internal_overview():
 
     active_targets = prometheus_targets.get("data", {}).get("activeTargets", []) if isinstance(prometheus_targets, dict) else []
     fastapi_target = next((target for target in active_targets if target.get("labels", {}).get("job") == "fastapi"), None)
+    ia = _ia_summary()
+    ia["runtime"] = _ia_runtime_summary()
 
     metrics = {
         "api_up": _prometheus_query('up{job="fastapi"}'),
@@ -393,12 +473,13 @@ def get_internal_overview():
             "available": grafana_url is not None,
             "dashboards": grafana_search if isinstance(grafana_search, list) else [],
             "dashboard_url": "http://localhost:3001/d/obrail-api-monitoring/obrail-api-monitoring",
+            "ia_dashboard_url": "http://localhost:3001/d/obrail-ia-monitoring/obrail-ia-monitoring",
         },
         "docker": _docker_status(),
         "ci_cd": _github_actions_status(),
         "db_totals": _db_totals(),
         "reports": reports,
-        "ia": _ia_summary(),
+        "ia": ia,
     }
 
 

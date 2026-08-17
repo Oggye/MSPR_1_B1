@@ -136,3 +136,89 @@ def test_ia_summary_returns_degraded_when_classifier_is_missing(tmp_path, monkey
     assert result["available"] is True
     assert result["status"] == "degraded"
     assert result["artifacts"]["classifier"] is False
+
+
+def test_ia_runtime_summary_returns_prometheus_metrics(monkeypatch):
+    query_values = {
+        'sum(obrail_ai_predictions_total{status="success"})': 12.0,
+        'sum(obrail_ai_predictions_total{status="error"})': 2.0,
+        (
+            "histogram_quantile(0.95, "
+            "sum(rate(obrail_ai_inference_seconds_bucket[5m])) by (le))"
+        ): 0.084,
+        'sum(increase(obrail_ai_predictions_total{status="error"}[5m]))': 0.0,
+    }
+    monkeypatch.setattr(
+        internal,
+        "_prometheus_query",
+        lambda query: query_values[query],
+    )
+
+    def vector(query):
+        if "classification" in query:
+            return [
+                {"metric": {"label": "Croissance / stabilité probable"}, "value": 4.0},
+                {"metric": {"label": "Baisse probable"}, "value": 3.0},
+            ]
+        return [
+            {"metric": {"trend": "Croissance"}, "value": 3.0},
+            {"metric": {"trend": "Stable"}, "value": 1.0},
+            {"metric": {"trend": "Déclin"}, "value": 1.0},
+        ]
+
+    monkeypatch.setattr(internal, "_prometheus_vector", vector)
+
+    result = internal._ia_runtime_summary()
+
+    assert result["available"] is True
+    assert result["status"] == "healthy"
+    assert result["predictions_success"] == 12.0
+    assert result["predictions_error"] == 2.0
+    assert result["latency_p95_seconds"] == 0.084
+    assert result["classification"]["total"] == 7.0
+    assert result["classification"]["distribution"]["Baisse probable"] == 3.0
+    assert result["regression"]["total"] == 5.0
+    assert result["regression"]["distribution"]["Stable"] == 1.0
+
+
+def test_ia_runtime_summary_handles_no_predictions(monkeypatch):
+    monkeypatch.setattr(
+        internal,
+        "_prometheus_query",
+        lambda query: float("nan") if "histogram_quantile" in query else 0.0,
+    )
+    monkeypatch.setattr(internal, "_prometheus_vector", lambda query: [])
+
+    result = internal._ia_runtime_summary()
+
+    assert result["available"] is True
+    assert result["status"] == "no_data"
+    assert result["latency_p95_seconds"] is None
+    assert result["classification"] == {"total": 0, "distribution": {}}
+    assert result["regression"] == {"total": 0, "distribution": {}}
+
+
+def test_overview_keeps_offline_ia_when_prometheus_is_unavailable(monkeypatch):
+    offline = {
+        "available": True,
+        "status": "healthy",
+        "artifacts": {"manifest": True, "classifier": True, "regressor": True},
+        "classification": {"overall": {"f1": 0.82}},
+        "regression": {"overall": {"mae": 123.4}},
+    }
+    monkeypatch.setattr(internal, "_first_ok", lambda urls, path: ({"error": "offline"}, None))
+    monkeypatch.setattr(internal, "_prometheus_query", lambda query: None)
+    monkeypatch.setattr(internal, "_prometheus_vector", lambda query: [])
+    monkeypatch.setattr(internal, "_ia_summary", lambda: offline.copy())
+    monkeypatch.setattr(internal, "_reports_summary", lambda: {})
+    monkeypatch.setattr(internal, "_docker_status", lambda: {})
+    monkeypatch.setattr(internal, "_github_actions_status", lambda: {})
+    monkeypatch.setattr(internal, "_db_totals", lambda: {})
+
+    result = internal.get_internal_overview()
+
+    assert result["ia"]["available"] is True
+    assert result["ia"]["status"] == "healthy"
+    assert result["ia"]["artifacts"]["manifest"] is True
+    assert result["ia"]["classification"]["overall"]["f1"] == 0.82
+    assert result["ia"]["runtime"]["available"] is False

@@ -411,9 +411,10 @@ La stack de supervision comprend Prometheus (collecte des métriques API), Grafa
 
 | Catégorie | Métriques surveillées |
 |-----------|----------------------|
-| Techniques | Latence des requêtes, taux d'erreur 4xx/5xx, temps d'inférence par modèle |
-| Métier ML | Distribution des prédictions (ratio déclin/croissance), confiance moyenne par période |
-| Drift ML | Dérive des inputs vs distribution d'entraînement (data drift), dégradation sur nouvelles données réelles (model drift) |
+| Techniques | Latence et taux d'erreur HTTP, volume, erreurs et temps d'inférence IA |
+| Métier ML | Distribution des classifications et des tendances de régression par horizon |
+| Évaluation offline | Version et disponibilité des artefacts, F1, ROC-AUC, Accuracy, MAE, RMSE et R² issus du holdout |
+| Perspectives | Détection automatique du data drift ; model drift lorsque de nouvelles vérités terrain seront disponibles |
 
 Chaque prédiction produit une ligne de log structurée collectée par Promtail, permettant une traçabilité complète des décisions du modèle en production.
 
