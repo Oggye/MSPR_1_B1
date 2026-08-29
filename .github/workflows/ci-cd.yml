@@ -219,17 +219,64 @@ jobs:
 
 
 
+  ml-pipeline-validation:
+    name: ML Pipeline Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run ETL and ML pipeline with Docker Compose
+        run: |
+          set -euo pipefail
+          docker compose up --build -d ia
+
+          set +e
+          docker compose wait ia
+          WAIT_EXIT_CODE=$?
+          set -e
+
+          IA_EXIT_CODE=$(docker inspect obrail_ia --format='{{.State.ExitCode}}')
+          if [ "$WAIT_EXIT_CODE" -ne 0 ] || [ "$IA_EXIT_CODE" -ne 0 ]; then
+            echo "IA pipeline failed (wait=$WAIT_EXIT_CODE, container=$IA_EXIT_CODE)"
+            exit 1
+          fi
+
+      - name: Validate generated artifacts
+        run: >-
+          docker compose run --rm --no-deps ia
+          python -m ia.src.ml.validate_artifacts
+
+      - name: Show pipeline logs on failure
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --tail=300 db etl ia
+
+      - name: Stop ML pipeline services
+        if: always()
+        run: docker compose down -v
+
+
+
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [backend-tests, ia-tests, frontend-tests, code-quality]
+    needs:
+      - backend-tests
+      - ia-tests
+      - frontend-tests
+      - code-quality
+      - ml-pipeline-validation
     if: >-
       always() &&
       needs.backend-tests.result == 'success' &&
       needs.ia-tests.result == 'success' &&
       needs.frontend-tests.result == 'success' &&
-      needs.code-quality.result == 'success'
+      needs.code-quality.result == 'success' &&
+      needs.ml-pipeline-validation.result == 'success'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -281,24 +328,70 @@ jobs:
           done
 
 
-  deploy:
+  container-smoke-test:
     name: Container Smoke Test
     needs: [docker-push]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Démarrer les services
-        run: docker compose up -d db api front
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Vérifier que les containers tournent
+      - name: Pull published application images
         run: |
-          sleep 10
-          docker compose ps
-          docker compose logs api --tail=20
+          set -euo pipefail
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
 
-      - name: Arrêter les services
+          for SERVICE in front api etl ia; do
+            TARGET="ghcr.io/$OWNER/mspr_1_b3-$SERVICE:latest"
+            LOCAL_IMAGE=$(docker compose config --images | grep -E -- "-${SERVICE}$")
+
+            if [ -z "$LOCAL_IMAGE" ]; then
+              echo "ERROR: local Compose image name missing for '$SERVICE'"
+              exit 1
+            fi
+
+            docker pull "$TARGET"
+            docker tag "$TARGET" "$LOCAL_IMAGE"
+          done
+
+      - name: Start essential local services
+        run: |
+          set -euo pipefail
+          docker compose up -d --no-build db prometheus loki grafana
+          docker compose up -d --no-build --no-deps api
+          docker compose up -d --no-build --no-deps front
+
+      - name: Check containers and endpoints
+        run: |
+          set -euo pipefail
+
+          for i in {1..60}; do
+            if docker compose exec -T db pg_isready -U "$DB_USER" -d "$DB_NAME" >/dev/null \
+              && curl -fsS http://localhost:8000/health >/dev/null \
+              && curl -fsS http://localhost:8000/api/docs >/dev/null \
+              && curl -fsS http://localhost:3000/externe/HomePage >/dev/null; then
+              docker compose ps
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "Essential services did not become ready in time"
+          docker compose ps -a
+          docker compose logs --tail=200 db api front
+          exit 1
+
+      - name: Stop local services
         if: always()
-        run: docker compose down
+        run: docker compose down -v
