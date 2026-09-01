@@ -127,8 +127,26 @@ def _print_quality_summary(df: pd.DataFrame):
     print(f"   Qualité source : {counts}")
 
 
+def _single_horizon_compatibility_view(df: pd.DataFrame, target: str):
+    if "horizon" not in df.columns:
+        return df
+
+    df = df.loc[df["horizon"] == 1].copy()
+    df["passengers_lag1"] = df["passengers"]
+    df["passengers_lag2"] = df["passengers_previous"]
+    df["passengers_growth_lag"] = df["passenger_growth_1y"]
+    df["co2_emissions_lag1"] = df["co2_emissions"]
+    df["co2_emissions_lag2"] = df["co2_previous"]
+    df["co2_growth_lag"] = df["co2_growth_1y"]
+    df["year"] = df["target_year"]
+    if target == REG_TARGET:
+        df[REG_TARGET] = df["target_passengers"]
+    return df
+
+
 def load_regression_data():
     df = pd.read_csv(REGRESSION_DATASET_PATH, low_memory=False)
+    df = _single_horizon_compatibility_view(df, REG_TARGET)
     features = REG_NUMERIC_FEATURES + REG_CATEGORICAL_FEATURES
 
     _validate_dataset(
@@ -159,6 +177,7 @@ def load_regression_data():
 
 def load_classification_data():
     df = pd.read_csv(CLASSIF_DATASET_PATH, low_memory=False)
+    df = _single_horizon_compatibility_view(df, CLF_TARGET)
     features = CLF_NUMERIC_FEATURES + CLF_CATEGORICAL_FEATURES
 
     _validate_dataset(

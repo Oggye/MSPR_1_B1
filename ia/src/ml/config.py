@@ -19,6 +19,8 @@ QUALITY_FILE = WAREHOUSE_DIR / "country_stats_quality.csv"
 REGRESSION_DATASET_PATH = DATA_ML_DIR / "regression_dataset_multihorizon.csv"
 CLASSIF_DATASET_PATH = DATA_ML_DIR / "classification_dataset_multihorizon.csv"
 DATASET_QUALITY_REPORT_PATH = DATA_ML_DIR / "dataset_quality_report_multihorizon.json"
+PREPROCESSOR_CLF_PATH = DATA_ML_DIR / "preprocessor_classification.joblib"
+PREPROCESSOR_REG_PATH = DATA_ML_DIR / "preprocessor_regression.joblib"
 
 FORECAST_CLASSIFIER_PATH = MODELS_DIR / "forecast_classifier.joblib"
 FORECAST_REGRESSOR_PATH = MODELS_DIR / "forecast_regressor.joblib"
@@ -30,6 +32,7 @@ MAX_FORECAST_HORIZON = 3
 
 # Le holdout final reste entièrement hors de la sélection de modèle.
 FINAL_TEST_TARGET_START_YEAR = 2022
+TEMPORAL_TEST_START_YEAR = 2020
 
 # Années utilisées pour la sélection en validation temporelle glissante.
 CV_VALIDATION_YEARS = [2018, 2019, 2020, 2021]
