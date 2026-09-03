@@ -34,7 +34,9 @@ export default function AppRoutes() {
       <Route path="/legal" element={<LegalPage />} />
 
       <Route element={<ProtectedRoute />}>
-        <Route path="/ia" element={<IaPage />} />
+        <Route path="/ia" element={<LayoutInterne />}>
+          <Route index element={<IaPage />} />
+        </Route>
         <Route path="/externe" element={<LayoutExterne />}>
           <Route index element={<ExterneHomePage />} />
           <Route path="HomePage" element={<ExterneHomePage />} />

@@ -41,6 +41,11 @@
   background: rgba(255, 255, 255, 0.1);
 }
 
+.internal-nav a.active {
+  background: #1769aa;
+  color: white;
+}
+
 .internal-content {
   flex: 1;
   min-width: 0;
