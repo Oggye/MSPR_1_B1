@@ -3,6 +3,7 @@
 # Importation de MagicMock pour simuler la base de données et SimpleNamespace pour créer des objets simples
 from unittest.mock import MagicMock
 from types import SimpleNamespace
+from sqlalchemy import column, table
 from app.routers.analysis import compare_train_types, get_policy_recommendations
 
 
@@ -47,24 +48,39 @@ def test_get_policy_recommendations():
     db = MagicMock()
 
     top_mock = MagicMock()
-    top_mock.group_by.return_value.order_by.return_value.limit.return_value.all.return_value = [
+    top_mock.join.return_value.group_by.return_value.order_by.return_value.limit.return_value.all.return_value = [
         SimpleNamespace(country_name="France", avg_co2=0.08),
         SimpleNamespace(country_name="Germany", avg_co2=0.07),
     ]
 
-    success_mock = MagicMock()
-    success_mock.group_by.return_value.having.return_value.order_by.return_value.first.return_value = SimpleNamespace(
-        country_name="Switzerland",
-        avg_co2=0.02,
-        fact_id=50
+    stats_mock = MagicMock()
+    stats_mock.group_by.return_value.subquery.return_value = table(
+        "stats_by_country",
+        column("country_id"),
+        column("avg_co2"),
     )
 
-    db.query.side_effect = [top_mock, success_mock]
+    trains_mock = MagicMock()
+    trains_mock.group_by.return_value.subquery.return_value = table(
+        "trains_by_country",
+        column("country_id"),
+        column("train_count"),
+    )
+
+    success_mock = MagicMock()
+    success_mock.join.return_value.join.return_value.filter.return_value.order_by.return_value.first.return_value = SimpleNamespace(
+        country_name="Switzerland",
+        avg_co2=0.02,
+        train_count=50,
+    )
+
+    db.query.side_effect = [top_mock, stats_mock, trains_mock, success_mock]
 
     result = get_policy_recommendations(db)
 
     assert "recommendations" in result
     assert isinstance(result["recommendations"], list)
+    assert len(result["recommendations"]) == 2
 
 
 
@@ -73,12 +89,29 @@ def test_get_policy_recommendations():
 def test_policy_recommendations_empty():
     db = MagicMock()
 
-    empty_mock = MagicMock()
-    empty_mock.group_by.return_value.order_by.return_value.limit.return_value.all.return_value = []
+    top_mock = MagicMock()
+    top_mock.join.return_value.group_by.return_value.order_by.return_value.limit.return_value.all.return_value = []
 
-    db.query.return_value = empty_mock
+    stats_mock = MagicMock()
+    stats_mock.group_by.return_value.subquery.return_value = table(
+        "stats_by_country",
+        column("country_id"),
+        column("avg_co2"),
+    )
+
+    trains_mock = MagicMock()
+    trains_mock.group_by.return_value.subquery.return_value = table(
+        "trains_by_country",
+        column("country_id"),
+        column("train_count"),
+    )
+
+    success_mock = MagicMock()
+    success_mock.join.return_value.join.return_value.filter.return_value.order_by.return_value.first.return_value = None
+
+    db.query.side_effect = [top_mock, stats_mock, trains_mock, success_mock]
 
     result = get_policy_recommendations(db)
 
     assert "recommendations" in result
-    assert isinstance(result["recommendations"], list)
+    assert result["recommendations"] == []

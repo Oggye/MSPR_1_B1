@@ -13,7 +13,9 @@ class TestOperatorsEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 5  # 5 opérateurs dans sample_data
-        assert data[0]["operator_name"] == "SNCF"
+        names = [operator["operator_name"] for operator in data]
+        assert names == sorted(names)
+        assert set(names) == {"SNCF", "DB", "Trenitalia", "Renfe", "ÖBB"}
 
     def test_get_operator_stats(self, client, sample_data):
         """Test récupération des stats d'un opérateur spécifique"""

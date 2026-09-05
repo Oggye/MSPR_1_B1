@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,6 +22,7 @@ from app.models import (
     FactsCountryStats,
     FactsNightTrains,
 )
+from app.security import require_admin, require_user
 
 
 SQLALCHEMY_DATABASE_URL = "sqlite:///:memory:"
@@ -54,7 +56,12 @@ def db_session():
 @pytest.fixture(scope="function")
 def client():
     previous_override = app.dependency_overrides.get(get_db)
+    previous_user = app.dependency_overrides.get(require_user)
+    previous_admin = app.dependency_overrides.get(require_admin)
     app.dependency_overrides[get_db] = override_get_db
+    user = SimpleNamespace(id=1, email="admin@test.invalid", role="admin", is_active=True)
+    app.dependency_overrides[require_user] = lambda: user
+    app.dependency_overrides[require_admin] = lambda: user
     try:
         with TestClient(app) as test_client:
             yield test_client
@@ -63,6 +70,14 @@ def client():
             app.dependency_overrides.pop(get_db, None)
         else:
             app.dependency_overrides[get_db] = previous_override
+        if previous_user is None:
+            app.dependency_overrides.pop(require_user, None)
+        else:
+            app.dependency_overrides[require_user] = previous_user
+        if previous_admin is None:
+            app.dependency_overrides.pop(require_admin, None)
+        else:
+            app.dependency_overrides[require_admin] = previous_admin
 
 
 @pytest.fixture(scope="function")

@@ -1,12 +1,15 @@
 # app/schemas/statistics.py
-from pydantic import BaseModel
-from typing import List, Optional
+from typing import Optional
+
 from .base import BaseSchema
 
 
+PASSENGER_METRIC = "MIO_PKM"
+PASSENGER_UNIT = "million passenger-km"
+
+
 class DashboardMetricsResponse(BaseSchema):
-    """Schéma de réponse pour les métriques agrégées du dashboard."""
-    country_id: int          # ajouté : la vue le retourne maintenant
+    country_id: int
     country_name: str
     country_code: str
     avg_passengers: float
@@ -15,39 +18,43 @@ class DashboardMetricsResponse(BaseSchema):
 
 
 class KPIsResponse(BaseSchema):
-    """Schéma de réponse pour les KPI."""
     total_countries: int
-    total_trains: int             # ajouté
+    total_trains: int
     total_night_trains: int
-    total_day_trains: int         # ajouté
+    total_day_trains: int
     total_operators: int
     years_covered: str
     avg_co2_per_passenger: float
     total_passengers: float
     total_co2_emissions: float
 
+    # Information sémantique : la colonne historique `passengers` transporte
+    # désormais la métrique canonique Eurostat MIO_PKM.
+    passenger_metric: str = PASSENGER_METRIC
+    passenger_unit: str = PASSENGER_UNIT
+
 
 class TimelineData(BaseSchema):
-    """Schéma pour les données d'évolution temporelle."""
     year: int
     passengers: Optional[float] = None
     co2_emissions: Optional[float] = None
     co2_per_passenger: Optional[float] = None
-    night_trains_count: Optional[int] = None
-    day_trains_count: Optional[int] = None    # ajouté pour la cohérence
+    total_trains_count: int = 0
+    night_trains_count: int = 0
+    day_trains_count: int = 0
+    passenger_metric: str = PASSENGER_METRIC
+    passenger_unit: str = PASSENGER_UNIT
 
 
 class CO2RankingItem(BaseSchema):
-    """Schéma pour le classement des pays par performance CO2."""
     country_name: str
     country_code: str
     avg_co2_per_passenger: float
     ranking: int
-    performance: str  # "good", "medium", "bad"
+    performance: str
 
 
 class TrainTypeComparison(BaseSchema):
-    """Schéma pour la comparaison entre trains de jour et de nuit."""
     train_type: str
     avg_passengers: float
     avg_distance: float

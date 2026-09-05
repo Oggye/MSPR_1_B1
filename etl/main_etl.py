@@ -18,6 +18,8 @@ try:
     from extract.extract_back_on_track_eu import extract_back_on_track
     from extract.extract_gtfs_ch import extract_gtfs_ch
     from extract.extract_gtfs_de import extract_gtfs_de
+    from extract.extract_gtfs_es import extract_gtfs_es
+    from extract.extract_gtfs_lu import extract_gtfs_lu
     from extract.extract_emission_co2 import download_eurostat_via_api
 except ImportError as e:
     print(f"⚠️  Modules d'extraction non trouvés: {e}")
@@ -49,10 +51,15 @@ def run_extraction():
     # Liste des extracteurs avec leur nom et fonction associée
     extractors = [
         ("GTFS France", extract_gtfs_fr),
+        ("GTFS Allemagne", extract_gtfs_de),
+        ("GTFS Suisse", extract_gtfs_ch),
+
+        # Nouvelle couverture européenne
+        ("GTFS Espagne", extract_gtfs_es),
+        ("GTFS Luxembourg", extract_gtfs_lu),
+
         ("Eurostat (trafic ferroviaire)", extract_eurostat),
         ("Back on Track EU", extract_back_on_track),
-        ("GTFS Suisse", extract_gtfs_ch),
-        ("GTFS Allemagne", extract_gtfs_de),
         ("Émissions CO2", download_eurostat_via_api),
     ]
     

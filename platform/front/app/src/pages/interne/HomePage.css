@@ -41,6 +41,11 @@
   background: rgba(255, 255, 255, 0.1);
 }
 
+.internal-nav a.active {
+  background: #1769aa;
+  color: white;
+}
+
 .internal-content {
   flex: 1;
   min-width: 0;
@@ -398,6 +403,21 @@ th {
 .definition-list dd {
   margin: 0;
   color: #17202a;
+}
+
+.ia-section {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid #e5ebf1;
+}
+
+.ia-section h4 {
+  margin: 14px 0 0;
+  color: #12263a;
+}
+
+.ia-runtime-distributions {
+  margin: 20px 0;
 }
 
 .text-block {

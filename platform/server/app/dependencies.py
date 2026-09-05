@@ -2,6 +2,7 @@
 from typing import Generator
 from app.database import SessionLocal
 
+
 def get_db() -> Generator:
     """
     Dépendance pour obtenir une session de base de données.

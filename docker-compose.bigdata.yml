@@ -1,0 +1,21 @@
+name: obrail-bigdata
+
+services:
+  spark-bigdata:
+    image: apache/spark:3.5.9-python3
+    user: "0:0"
+    working_dir: /app
+    environment:
+      SPARK_LOCAL_IP: 127.0.0.1
+      SPARK_LOCAL_DIRS: /tmp/spark
+    volumes:
+      - ./bigdata:/app/bigdata:ro
+      - ./data/raw:/app/data/raw:ro
+      - ./data/bigdata:/app/data/bigdata
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[*]
+      - --conf
+      - spark.driver.memory=2g
+      - /app/bigdata/spark_gtfs.py

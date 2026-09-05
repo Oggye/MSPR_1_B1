@@ -1,7 +1,9 @@
 import { Link, Outlet } from 'react-router-dom';
 import { useState, useEffect } from 'react';
+import { useAuth } from '../auth/AuthContext';
 
 export default function LayoutExterne() {
+  const { user, logout } = useAuth();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
 
@@ -22,6 +24,7 @@ export default function LayoutExterne() {
     { path: "/externe/Map", label: "🗺️ Carte", icon: "🗺️" },
     { path: "/externe/Statistique", label: "📈 Statistiques", icon: "📈" },
     { path: "/externe/Operateur", label: "🏢 Opérateurs", icon: "🏢" },
+    { path: "/ia", label: "IA", icon: "IA" },
     { path: "/pages/HomePage", label: "Accueil"}
   ];
 
@@ -98,6 +101,12 @@ export default function LayoutExterne() {
             </li>
           ))}
         </ul>
+        <div style={{ opacity: isMobile && !isMobileMenuOpen ? 0 : 1, marginTop: 24 }}>
+          <p style={{ color: '#b7c4d1', overflowWrap: 'anywhere' }}>{user?.email}</p>
+          <button type="button" onClick={logout} style={{ width: '100%', padding: '9px', cursor: 'pointer' }}>
+            Déconnexion
+          </button>
+        </div>
       </aside>
 
       {/* CONTENU PRINCIPAL */}

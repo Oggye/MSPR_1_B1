@@ -1,327 +1,282 @@
-# server\app\routers\metadata.py
-# ROUTER: Endpoints de métadonnées et qualité des données
-# ========================================================
-# Rôle: Garantir la transparence et la traçabilité du processus ETL
-#       conformément aux exigences RGPD et aux bonnes pratiques.
+# app/routers/metadata.py
+"""
+Métadonnées et qualité des données.
 
+Le rapport prioritaire est celui généré par l'ETL dans data/warehouse.
+Aucune métrique de qualité n'est inventée si ce rapport n'est pas disponible.
+"""
+
+from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
-from datetime import datetime
 
 router = APIRouter()
 
+
+def _quality_report_candidates() -> list[Path]:
+    candidates: list[Path] = []
+
+    explicit = os.getenv("QUALITY_REPORT_PATH")
+    if explicit:
+        candidates.append(Path(explicit))
+
+    # Chemin Docker : ./data est monté dans /app/data.
+    candidates.append(Path("/app/data/warehouse/quality_reports.json"))
+
+    # Exécution locale : cherche un dossier data/warehouse en remontant
+    # l'arborescence à partir de ce fichier.
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        candidates.append(
+            parent / "data" / "warehouse" / "quality_reports.json"
+        )
+
+    # Dernier recours : ancien rapport empaqueté avec l'API.
+    candidates.append(
+        Path(__file__).resolve().parents[1]
+        / "reports"
+        / "quality_reports.json"
+    )
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def _load_quality_report() -> tuple[dict[str, Any] | None, Path | None]:
+    for path in _quality_report_candidates():
+        if not path.is_file():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Rapport de qualité illisible: {path.name}: {exc}",
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise HTTPException(
+                status_code=500,
+                detail="Le rapport de qualité doit être un objet JSON.",
+            )
+        return data, path
+
+    return None, None
+
+
 @router.get("/api/metadata/quality")
 def get_quality_report():
-    """
-    Récupère le rapport de qualité des données.
-    Source: reports/quality_reports.json (généré par le pipeline ETL)
-    """
-    try:
-        # Construction du chemin vers le fichier de rapport
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(os.path.dirname(current_dir))
-        report_path = os.path.join(project_root, "app", "reports", "quality_reports.json")
-        
-        # Chargement du rapport
-        if os.path.exists(report_path):
-            with open(report_path, 'r', encoding='utf-8') as f:
-                report_data = json.load(f)
-        else:
-            # Rapport par défaut si le fichier n'existe pas
-            report_data = {
-                "execution_date": datetime.now().isoformat(),
-                "project": "ObRail - Observatoire Européen du Rail",
-                "version": "1.0.0",
-                "quality_indicators": {
-                    "completeness": 97.8,
-                    "consistency": 96.5,
-                    "accuracy": 95.2,
-                    "timeliness": 100.0,
-                    "overall_score": 97.4
-                },
-                "data_sources": [
-                    {
-                    "name": "Back-on-Track Night Train Database",
-                    "description": "Base de référence européenne des trains de nuit",
-                    "coverage": "Europe (20 pays, 196 trains)",
-                    "update_frequency": "Mensuelle",
-                    "records_processed": 196,
-                    "quality_score": 98.5
-                    },
-                    {
-                    "name": "Eurostat - Rail Passengers",
-                    "description": "Statistiques officielles de passagers ferroviaires",
-                    "coverage": "UE-27 + pays associés (37 pays)",
-                    "update_frequency": "Annuelle",
-                    "records_processed": 1605,
-                    "quality_score": 99.0
-                    },
-                    {
-                    "name": "Eurostat - CO2 Emissions",
-                    "description": "Émissions de gaz à effet de serre par secteur",
-                    "coverage": "30 pays européens",
-                    "update_frequency": "Annuelle",
-                    "records_processed": 92488,
-                    "quality_score": 96.5
-                    },
-                    {
-                    "name": "GTFS France (SNCF)",
-                    "description": "Données du réseau ferré français",
-                    "coverage": "France (8803 gares, 780 routes)",
-                    "update_frequency": "Hebdomadaire",
-                    "records_processed": 19588,
-                    "quality_score": 99.5
-                    },
-                    {
-                    "name": "GTFS Suisse (CFF)",
-                    "description": "Données du réseau ferré suisse",
-                    "coverage": "Suisse (103480 gares, 9527 routes)",
-                    "update_frequency": "Hebdomadaire",
-                    "records_processed": 123485,
-                    "quality_score": 99.5
-                    },
-                    {
-                    "name": "GTFS Allemagne (DB)",
-                    "description": "Données du réseau ferré allemand",
-                    "coverage": "Allemagne (1251 gares, 94 routes)",
-                    "update_frequency": "Hebdomadaire",
-                    "records_processed": 5536,
-                    "quality_score": 98.0
-                    }
-                ],
-                "etl_process": {
-                    "last_execution": datetime.now().isoformat(),
-                    "status": "Completed",
-                    "execution_time_seconds": 347,
-                    "sources_processed": 6,
-                    "records_extracted": 237458,
-                    "records_transformed": 134782,
-                    "records_loaded": 856,
-                    "errors_count": 3,
-                    "warnings_count": 12,
-                    "error_details": [
-                    {
-                        "source": "eurostat",
-                        "type": "warning",
-                        "message": "3 enregistrements avec codes pays non standardisés (corrigés automatiquement)",
-                        "count": 3
-                    }
-                    ],
-                    "warning_details": [
-                    {
-                        "source": "back_on_track",
-                        "type": "info",
-                        "message": "12 entrées avec opérateurs multiples (ex: 'PKP, ČD') - conservées pour traçabilité",
-                        "count": 12
-                    }
-                    ]
-                },
-                "data_quality_report": {
-                    "dimensions": {
-                    "countries": {
-                        "total": 48,
-                        "with_unknown": 1,
-                        "unknown_rate": 2.1,
-                        "coverage_rate": 97.9,
-                        "quality_issue": "Un code pays non identifié (XK) - à enrichir"
-                    },
-                    "years": {
-                        "total": 15,
-                        "range": "2010-2024",
-                        "continuous": True,
-                        "completeness": 100.0
-                    },
-                    "operators": {
-                        "total": 37,
-                        "unique": 30,
-                        "with_partnerships": 7,
-                        "completeness": 100.0
-                    }
-                    },
-                    "facts": {
-                    "night_trains": {
-                        "total_records": 196,
-                        "countries_covered": 20,
-                        "top_country": "Ukraine (50 trains)",
-                        "temporal_coverage": "2010-2024",
-                        "recent_records_2024": 192,
-                        "completeness": 98.0
-                    },
-                    "country_stats": {
-                        "total_records": 611,
-                        "countries_covered": 37,
-                        "years_covered": 15,
-                        "passenger_data_completeness": 97.5,
-                        "co2_data_completeness": 96.8
-                    },
-                    "dashboard_metrics": {
-                        "total_records": 41,
-                        "countries_covered": 41,
-                        "metrics_computed": [
-                        "avg_passengers",
-                        "avg_co2_emissions",
-                        "avg_co2_per_passenger"
-                        ],
-                        "completeness": 100.0
-                    }
-                    },
-                    "gtfs_integration": {
-                    "france": {
-                        "agencies": 5,
-                        "routes": 780,
-                        "stops": 8803,
-                        "night_trains_identified": 9,
-                        "coordinate_quality": 100.0
-                    },
-                    "switzerland": {
-                        "agencies": 478,
-                        "routes": 9527,
-                        "stops": 103480,
-                        "night_trains_identified": 1,
-                        "coordinate_quality": 100.0
-                    },
-                    "germany": {
-                        "agencies": 13,
-                        "routes": 94,
-                        "stops": 1251,
-                        "night_trains_identified": 24,
-                        "coordinate_quality": 100.0
-                    }
-                    }
-                },
-                "transformations_applied": [
-                    "Nettoyage des valeurs manquantes",
-                    "Standardisation améliorée des formats de pays",
-                    "Filtrage des données avant 2010",
-                    "Création des clés étrangères",
-                    "Calcul des métriques agrégées",
-                    "Complétement des données manquantes avec valeurs réalistes",
-                    "Détection et correction automatique des codes pays non standardisés",
-                    "Agrégation des données GTFS par pays",
-                    "Jointure entre sources hétérogènes (eurostat + back-on-track)"
-                ],
-                "summary": {
-                    "total_sources_processed": 6,
-                    "total_records_processed": 856,
-                    "total_records_extracted": 237458,
-                    "compression_rate": 99.64,
-                    "data_quality_score": 97.4,
-                    "rgpd_compliance": True,
-                    "personal_data": False,
-                    "success": True,
-                    "next_scheduled_update": "2026-02-23T08:30:00.000000"
-                }               
-            }
-        
-        return report_data
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors du chargement du rapport: {str(e)}")
+    report, path = _load_quality_report()
+
+    if report is not None:
+        # Champs additionnels non destructifs : les anciens clients gardent le
+        # contenu original, les nouveaux savent quelle source a été utilisée.
+        result = dict(report)
+        result.setdefault("project", "ObRail Europe")
+        result.setdefault("execution_date", None)
+        result.setdefault("reports", [])
+        result.setdefault("summary", {})
+        result["metadata_report_source"] = str(path)
+        result["metadata_report_available"] = True
+        return result
+
+    # Fallback transparent, sans faux pourcentages ni faux volumes.
+    return {
+        "execution_date": datetime.now(timezone.utc).isoformat(),
+        "project": "ObRail Europe - MSPR",
+        "reports": [],
+        "traceability": {
+            "warning": (
+                "Aucun quality_reports.json généré par l'ETL n'a été trouvé."
+            )
+        },
+        "summary": {
+            "success": False,
+            "reason": "quality_report_missing",
+        },
+        "metadata_report_source": None,
+        "metadata_report_available": False,
+    }
+
+
+SOURCE_CATALOG = [
+    {
+        "id": 1,
+        "source_id": "eurostat_rail",
+        "name": "Eurostat - Rail",
+        "url": "https://ec.europa.eu/eurostat",
+        "description": (
+            "Statistiques européennes de trafic ferroviaire et de "
+            "voyageurs-km."
+        ),
+        "datasets": ["rail_traffic.csv", "rail_passengers.csv"],
+        "role": "statistiques officielles et calibration",
+    },
+    {
+        "id": 2,
+        "source_id": "eurostat_co2",
+        "name": "Eurostat - Émissions CO2",
+        "url": "https://ec.europa.eu/eurostat",
+        "description": "Inventaires nationaux d'émissions ENV_AIR_GGE.",
+        "datasets": [
+            "eurostat_env_air_gge_sdmx.csv",
+            "eurostat_env_air_gge_full.tsv",
+        ],
+        "role": "indicateurs environnementaux",
+    },
+    {
+        "id": 3,
+        "source_id": "back_on_track",
+        "name": "Back on Track EU",
+        "url": "https://back-on-track.eu",
+        "description": "Référence européenne dédiée aux trains de nuit.",
+        "datasets": ["view_ontd_list.csv", "view_ontd_cities.csv"],
+        "role": "trains de nuit réels",
+    },
+    {
+        "id": 4,
+        "source_id": "gtfs_fr",
+        "name": "GTFS France",
+        "url": "https://ressources.data.sncf.com",
+        "description": "Horaires ferroviaires GTFS France.",
+        "datasets": [
+            "agency",
+            "routes",
+            "trips",
+            "stops",
+            "stop_times",
+            "calendar_dates",
+        ],
+        "role": "services ferroviaires réels",
+    },
+    {
+        "id": 5,
+        "source_id": "gtfs_ch",
+        "name": "GTFS Suisse",
+        "url": "https://data.opentransportdata.swiss",
+        "description": "Horaires GTFS du réseau suisse.",
+        "datasets": [
+            "agency",
+            "routes",
+            "trips",
+            "stops",
+            "stop_times",
+            "calendar_dates",
+        ],
+        "role": "services ferroviaires réels",
+    },
+    {
+        "id": 6,
+        "source_id": "gtfs_de",
+        "name": "GTFS Allemagne",
+        "url": "https://www.bahn.de",
+        "description": "Horaires ferroviaires GTFS Allemagne.",
+        "datasets": [
+            "agency",
+            "routes",
+            "trips",
+            "stops",
+            "stop_times",
+            "calendar_dates",
+        ],
+        "role": "services ferroviaires réels",
+    },
+    {
+        "id": 7,
+        "source_id": "gtfs_es",
+        "name": "GTFS Espagne - Renfe",
+        "url": "https://data.renfe.com",
+        "description": (
+            "Horaires Renfe haute vitesse, longue distance et moyenne distance."
+        ),
+        "datasets": [
+            "agency",
+            "routes",
+            "trips",
+            "stops",
+            "stop_times",
+            "calendar_dates",
+        ],
+        "role": "services ferroviaires réels",
+    },
+    {
+        "id": 8,
+        "source_id": "gtfs_lu",
+        "name": "GTFS Luxembourg",
+        "url": "https://data.public.lu",
+        "description": "GTFS national luxembourgeois, filtré rail en transformation.",
+        "datasets": [
+            "agency",
+            "routes",
+            "trips",
+            "stops",
+            "stop_times",
+            "calendar_dates",
+        ],
+        "role": "services ferroviaires réels",
+    },
+]
+
+
+def _quality_by_source() -> dict[str, Any]:
+    report, _ = _load_quality_report()
+    if not report:
+        return {}
+
+    by_source: dict[str, Any] = {}
+    for item in report.get("reports", []):
+        if isinstance(item, dict) and item.get("source"):
+            by_source[str(item["source"])] = item
+    return by_source
+
 
 @router.get("/api/metadata/sources")
 def get_data_sources():
     """
-    Retourne le catalogue des sources de données utilisées.
+    Catalogue stable des sources.
+
+    Les volumes ne sont jamais codés en dur. Si le rapport ETL contient une
+    section pour la source, elle est jointe dans `quality_report`.
     """
+    quality = _quality_by_source()
+    sources = []
+
+    aliases = {
+        "eurostat_rail": ["eurostat"],
+        "eurostat_co2": ["emissions"],
+        "back_on_track": ["back_on_track"],
+        "gtfs_fr": ["gtfs_fr"],
+        "gtfs_ch": ["gtfs_ch"],
+        "gtfs_de": ["gtfs_de"],
+        "gtfs_es": ["gtfs_es"],
+        "gtfs_lu": ["gtfs_lu"],
+    }
+
+    for source in SOURCE_CATALOG:
+        item = dict(source)
+        report_item = None
+        for alias in aliases.get(source["source_id"], []):
+            if alias in quality:
+                report_item = quality[alias]
+                break
+        item["quality_report"] = report_item
+        sources.append(item)
+
     return {
-        "sources": [
-            {
-                "id": 1,
-                "name": "Eurostat - Rail Traffic",
-                "url": "https://ec.europa.eu/eurostat",
-                "description": "Office statistique de l'Union européenne - Trafic ferroviaire",
-                "datasets": [
-                    "rail_traffic.csv (trafic fret/voyageurs)",
-                    "rail_passengers.csv (passagers ferroviaires)"
-                ],
-                "license": "Creative Commons Attribution 4.0",
-                "update_frequency": "Annuelle",
-                "coverage": "2013-2024",
-                "geographic_scope": "UE-27 + pays associés",
-                "records_extracted": 2,  # fichiers CSV
-                "records_processed": 1605  # enregistrements transformés
-            },
-            {
-                "id": 2,
-                "name": "Eurostat - Émissions CO2",
-                "url": "https://ec.europa.eu/eurostat/data/database?node_code=env_air_gge",
-                "description": "Émissions de gaz à effet de serre par secteur (ENV_AIR_GGE)",
-                "datasets": [
-                    "eurostat_env_air_gge_sdmx.csv",
-                    "eurostat_env_air_gge_full.tsv"
-                ],
-                "license": "Creative Commons Attribution 4.0",
-                "update_frequency": "Annuelle",
-                "coverage": "1990-2023",
-                "geographic_scope": "30 pays européens",
-                "records_extracted": 1592910,  # lignes brutes
-                "records_processed": 92488  # enregistrements transformés
-            },
-            {
-                "id": 3,
-                "name": "Back on Track EU",
-                "url": "https://backontrack.eu",
-                "description": "Association européenne pour la promotion des trains de nuit",
-                "datasets": [
-                    "view_ontd_list.csv - Liste des trains de nuit",
-                    "view_ontd_cities.csv - Villes desservies"
-                ],
-                "license": "Open Data (usage non commercial)",
-                "update_frequency": "Mensuelle",
-                "coverage": "2024",
-                "geographic_scope": "Europe (20 pays, focus UA, DE, PL, RO, IT)",
-                "records_extracted": 2,  # fichiers CSV
-                "records_processed": 196  # trains de nuit après transformation
-            },
-            {
-                "id": 4,
-                "name": "GTFS France (SNCF)",
-                "url": "https://ressources.data.sncf.com",
-                "description": "Données temps réel et horaires du réseau ferré français",
-                "datasets": [
-                    "agency.csv", "calendar_dates.csv", "routes.csv",
-                    "stops.csv", "stop_times.csv", "trips.csv"
-                ],
-                "license": "Licence Ouverte / Open License",
-                "update_frequency": "Hebdomadaire",
-                "coverage": "2024",
-                "geographic_scope": "France",
-                "records_extracted": 6,  # fichiers CSV
-                "records_processed": 5  # enregistrements significatifs
-            },
-            {
-                "id": 5,
-                "name": "GTFS Suisse (CFF)",
-                "url": "https://data.opentransportdata.swiss",
-                "description": "Réseau ferré suisse - CFF",
-                "datasets": [
-                    "agency.*", "routes.*", "trips.*", 
-                    "stops.*", "stop_times.*", "calendar_dates.*"
-                ],
-                "license": "Open Data Commons",
-                "update_frequency": "Hebdomadaire",
-                "coverage": "2024",
-                "geographic_scope": "Suisse",
-                "records_extracted": 12,  # fichiers TXT + CSV
-                "records_processed": 478  # enregistrements transformés
-            },
-            {
-                "id": 6,
-                "name": "GTFS Allemagne (Deutsche Bahn)",
-                "url": "https://www.bahn.de",
-                "description": "Réseau ferré allemand - DB",
-                "datasets": [
-                    "agency.csv", "calendar_dates.csv", "routes.csv",
-                    "stops.csv", "stop_times.csv", "trips.csv"
-                ],
-                "license": "DL-DE-BY-2.0",
-                "update_frequency": "Hebdomadaire",
-                "coverage": "2024",
-                "geographic_scope": "Allemagne",
-                "records_extracted": 6,  # fichiers CSV
-                "records_processed": 13  # enregistrements transformés
-            }
-        ],
+        "sources": sources,
+        "count": len(sources),
+        "quality_report_available": bool(quality),
     }

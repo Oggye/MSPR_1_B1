@@ -24,6 +24,24 @@ class TestNightTrainsEndpoints:
         assert "night_train" in first
         assert "country_name" in first
 
+    def test_get_night_trains_pagination_limit(self, client, sample_data):
+        """La limite est appliquée par le contrat HTTP public."""
+        response = client.get("/api/night-trains?skip=0&limit=5")
+
+        assert response.status_code == 200
+        assert len(response.json()) <= 5
+
+    def test_get_night_trains_pagination_skip_changes_page(self, client, sample_data):
+        """Deux pages successives ne commencent pas par le même train."""
+        first_page = client.get("/api/night-trains?skip=0&limit=5")
+        second_page = client.get("/api/night-trains?skip=5&limit=5")
+
+        assert first_page.status_code == 200
+        assert second_page.status_code == 200
+        assert len(first_page.json()) == 5
+        assert len(second_page.json()) == 5
+        assert first_page.json()[0]["fact_id"] != second_page.json()[0]["fact_id"]
+
     def test_get_night_trains_summary(self, client, sample_data):
         """Test récupération du résumé des trains"""
         response = client.get("/api/night-trains/summary")

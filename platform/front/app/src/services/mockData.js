@@ -24,6 +24,8 @@ export const emptyOverview = {
   },
   reports: {
     quality: {},
+    quality_meta: { available: false },
     diagnostic: null,
+    diagnostic_meta: { available: false, stale: true },
   },
 };

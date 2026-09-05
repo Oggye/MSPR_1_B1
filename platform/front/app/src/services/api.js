@@ -1,178 +1,213 @@
-// fichier : platform/front/app/src/services/api.js     (ajouter les nouvelles fonctions)
-
-
 import axios from 'axios';
 
-const API_BASE_URL = 'http://localhost:8000/api';
+const API_BASE_URL = (
+  process.env.REACT_APP_API_BASE_URL || 'http://localhost:8000/api'
+).replace(/\/$/, '');
+
+const API_ROOT_URL = API_BASE_URL.replace(/\/api$/, '');
 
 const api = axios.create({
   baseURL: API_BASE_URL,
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },
 });
 
-// dashboard
-export const getSummary = () => {
-  return api.get('/night-trains/summary');
-};
+const rootApi = axios.create({
+  baseURL: API_ROOT_URL,
+  withCredentials: true,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
 
-export const getTimeline = () => {
-  return api.get('/statistics/timeline');
-};
-
-export const getCo2Ranking = (limit = null) => {
-  const params = {};
-
-  if (limit !== null) {
-    params.limit = limit;
+const handleUnauthorized = (error) => {
+  if (error?.response?.status === 401) {
+    window.dispatchEvent(new Event('obrail:unauthorized'));
   }
-
-  return api.get('/statistics/co2-ranking', { params });
+  return Promise.reject(error);
 };
 
-export const getDashboardKpis = () => {
-  return api.get('/dashboard/kpis');
-};
+api.interceptors?.response?.use?.(response => response, handleUnauthorized);
+rootApi.interceptors?.response?.use?.(response => response, handleUnauthorized);
 
-// Carte
-export const getNightTrains = (skip = 0, limit = null, filters = {}) => {
-  const params = { skip, ...filters };
+const cleanParams = (params = {}) => Object.fromEntries(
+  Object.entries(params).filter(([, value]) => (
+    value !== undefined
+    && value !== null
+    && value !== ''
+    && value !== 'all'
+  ))
+);
 
-  if (limit !== null) {
-    params.limit = limit;
-  }
+// Dashboard / synthèses
+export const getSummary = () => api.get('/night-trains/summary');
+export const getTimeline = () => api.get('/statistics/timeline');
+export const getDashboardKpis = () => api.get('/dashboard/kpis');
 
-  return api.get('/night-trains', { params });
-};
+export const getCo2Ranking = (limit = null) => (
+  api.get('/statistics/co2-ranking', {
+    params: cleanParams({ limit }),
+  })
+);
 
-export const getNightTrainsOnly = (filters = {}) => {
-  const params = { ...filters };
+export const getTrainTypeComparison = () => (
+  api.get('/analysis/train-types-comparison')
+);
 
-  if (params.limit === undefined) {
-    delete params.limit;
-  }
+export const getPolicyRecommendations = () => (
+  api.get('/analysis/policy-recommendations')
+);
 
-  return api.get('/night-trains/night', { params });
-};
+// Trains
+export const getTrainFacets = () => api.get('/night-trains/facets');
 
-export const getDayTrainsOnly = (filters = {}) => {
-  const params = { ...filters };
+export const getStratifiedTrains = (
+  slicePage = 1,
+  samplePerCountry = 2,
+  filters = {},
+) => (
+  api.get('/night-trains/stratified', {
+    params: cleanParams({
+      slice_page: slicePage,
+      sample_per_country: samplePerCountry,
+      ...filters,
+    }),
+  })
+);
 
-  if (params.limit === undefined) {
-    delete params.limit;
-  }
+export const getNightTrains = (
+  skip = 0,
+  limit = 100,
+  filters = {},
+) => (
+  api.get('/night-trains', {
+    params: cleanParams({ skip, limit, ...filters }),
+  })
+);
 
-  return api.get('/night-trains/day', { params });
-};
+export const getNightTrainsOnly = (
+  skip = 0,
+  limit = 100,
+  filters = {},
+) => (
+  api.get('/night-trains/night', {
+    params: cleanParams({ skip, limit, ...filters }),
+  })
+);
 
-export const getGeographicCoverage = () => {
-  return api.get('/geographic/coverage');
-};
+export const getDayTrainsOnly = (
+  skip = 0,
+  limit = 100,
+  filters = {},
+) => (
+  api.get('/night-trains/day', {
+    params: cleanParams({ skip, limit, ...filters }),
+  })
+);
 
-// Liste des trajets
-export const getAllTrains = (skip = 0, limit = null, filters = {}) => {
-  const params = { skip, ...filters };
+export const getGeographicCoverage = () => (
+  api.get('/geographic/coverage')
+);
 
-  if (limit !== null) {
-    params.limit = limit;
-  }
+export const getAllTrains = getNightTrains;
 
-  return api.get('/night-trains', { params });
-};
+export const getTrainsByCountry = (
+  countryCode,
+  skip = 0,
+  limit = 100,
+  filters = {},
+) => (
+  getNightTrains(skip, limit, {
+    country_code: countryCode,
+    ...filters,
+  })
+);
 
-export const getTrainsByCountry = (countryCode, skip = 0, limit = null) => {
-  const params = { country_code: countryCode, skip };
+export const getTrainsByOperator = (
+  operatorName,
+  skip = 0,
+  limit = 100,
+  filters = {},
+) => (
+  getNightTrains(skip, limit, {
+    operator_name: operatorName,
+    ...filters,
+  })
+);
 
-  if (limit !== null) {
-    params.limit = limit;
-  }
+export const getTrainsByYear = (
+  year,
+  skip = 0,
+  limit = 100,
+  filters = {},
+) => (
+  getNightTrains(skip, limit, {
+    year,
+    ...filters,
+  })
+);
 
-  return api.get('/night-trains', { params });
-};
+export const getTrainsByOperatorId = (
+  operatorId,
+  skip = 0,
+  limit = 25,
+  filters = {},
+) => (
+  api.get(`/night-trains/by-operator/${operatorId}`, {
+    params: cleanParams({ skip, limit, ...filters }),
+  })
+);
 
-export const getTrainsByOperator = (operatorName, skip = 0, limit = null) => {
-  const params = { operator_name: operatorName, skip };
+// Pays
+export const getCountries = (skip = 0, limit = 200) => (
+  api.get('/countries', {
+    params: cleanParams({ skip, limit }),
+  })
+);
 
-  if (limit !== null) {
-    params.limit = limit;
-  }
-
-  return api.get('/night-trains', { params });
-};
-
-export const getTrainsByYear = (year, skip = 0, limit = null) => {
-  const params = { year, skip };
-
-  if (limit !== null) {
-    params.limit = limit;
-  }
-
-  return api.get('/night-trains', { params });
-};
-
-export const getCountries = (skip = 0, limit = null) => {
-  const params = { skip };
-
-  if (limit !== null) {
-    params.limit = limit;
-  }
-
-  return api.get('/countries', { params });
-};
-
-// Statistiques avancées
-export const getTrainTypeComparison = () => {
-  return api.get('/analysis/train-types-comparison');
-};
-
-export const getPolicyRecommendations = () => {
-  return api.get('/analysis/policy-recommendations');
-};
-
-export const getOperatorStats = (operatorId) => {
-  return api.get(`/operators/${operatorId}/stats`);
-};
-
-export const getCountryStats = (filters = {}, skip = 0, limit = null) => {
-  const params = { skip, ...filters };
-
-  if (limit !== null) {
-    params.limit = limit;
-  }
-
-  return api.get('/countries/stats', { params });
-};
+export const getCountryStats = (
+  filters = {},
+  skip = 0,
+  limit = 100,
+) => (
+  api.get('/countries/stats', {
+    params: cleanParams({ skip, limit, ...filters }),
+  })
+);
 
 // Opérateurs
-export const getOperators = (skip = 0, limit = null) => {
-  const params = { skip };
+export const getOperators = (skip = 0, limit = 500) => (
+  api.get('/operators', {
+    params: cleanParams({ skip, limit }),
+  })
+);
 
-  if (limit !== null) {
-    params.limit = limit;
-  }
+export const getOperatorStats = operatorId => (
+  api.get(`/operators/${operatorId}/stats`)
+);
 
-  return api.get('/operators', { params });
-};
+export const getOperatorTimeline = operatorId => (
+  api.get(`/operators/${operatorId}/timeline`)
+);
 
-export const getOperatorById = (id) => {
-  return api.get(`/operators/${id}/stats`);
-};
+export const getOperatorById = getOperatorStats;
 
-// Prédictions IA — Classification (déclin ferroviaire)
-// payload : { country, year, co2_emissions, co2_per_passenger, co2_lag1, passengers_lag1, passengers_lag2 }
-export const predictClassification = (payload) => {
-  return api.post('/predict/classification', payload);
-};
+// IA
+export const getPredictionContext = () => (
+  api.get('/predict/context')
+);
 
-// Prédictions IA — Régression (volume de passagers)
-// payload : identique à predictClassification
-export const predictRegression = (payload) => {
-  return api.post('/predict/regression', payload);
-};
+export const predictClassification = payload => (
+  api.post('/predict/classification', payload)
+);
 
-export const getHealth = () => {
-  return api.get('/health');
-};
+export const predictRegression = payload => (
+  api.post('/predict/regression', payload)
+);
+
+// Health
+export const getHealth = () => rootApi.get('/health');
 
 export default api;

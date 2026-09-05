@@ -1,61 +1,91 @@
-# Fichier: platform/server/app/main.py
+# app/main.py
+import logging
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import countries, night_trains, dashboard, analysis, operators, metadata, statistics, internal, predict
+
+from app.routers import (
+    analysis,
+    auth,
+    countries,
+    dashboard,
+    internal,
+    metadata,
+    night_trains,
+    operators,
+    statistics,
+)
+from app.security import require_admin, require_user
+
+logger = logging.getLogger(__name__)
+
+# La route IA reste optionnelle au démarrage du serveur :
+# les tests API et les déploiements sans modèles ML doivent pouvoir démarrer.
+try:
+    from app.routers import predict
+except ImportError as exc:
+    predict = None
+    logger.warning("Route /predict désactivée: dépendance IA indisponible: %s", exc)
+
 try:
     from prometheus_fastapi_instrumentator import Instrumentator
 except ImportError:
     Instrumentator = None
 
+
 app = FastAPI(
     title="ObRail API - Observatoire Européen du Rail",
-    description="""
-    API de données ferroviaires européennes
-
-    Cette API fournit des données sur les transports ferroviaires en Europe, incluant:
-
-    Statistiques par pays : Passagers, émissions CO2, indicateurs de performance
-    Trains de nuit : Catalogue des liaisons nocturnes européennes
-    Analyses comparatives : Impact environnemental, classements
-    Projections : Tendances et prévisions
-    Recommandations politiques : Suggestions basées sur les données
-    """,
-    version="1.0.0",
-    docs_url="/api/docs",  # Documentation Swagger UI
-    openapi_url="/api/openapi.json",  # Documentation OpenAPI
-
+    description=(
+        "API de données ferroviaires européennes : services de jour et de "
+        "nuit, statistiques par pays, indicateurs environnementaux, qualité "
+        "des données et analyses."
+    ),
+    version="1.1.0",
+    docs_url="/api/docs",
+    openapi_url="/api/openapi.json",
 )
+
 
 if Instrumentator is not None:
     Instrumentator().instrument(app).expose(app)
 
-# Permet au frontend de communiquer avec l'API
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",    # J'autorise spécifiquement le frontend
-    ],
+    allow_origins=["http://localhost:3000", "http://front"],
     allow_credentials=True,
-    allow_methods=["*"],              # Autorise toutes les méthodes (GET, POST, etc.)
-    allow_headers=["*"],              # Autorise tous les headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-#Tous les routeurs
-app.include_router(countries.router)
-app.include_router(night_trains.router)
-app.include_router(dashboard.router)
-app.include_router(analysis.router)
-app.include_router(operators.router)
-app.include_router(metadata.router)
-app.include_router(statistics.router)
-app.include_router(internal.router)
-app.include_router(predict.router)
+
+app.include_router(auth.router)
+app.include_router(countries.router, dependencies=[Depends(require_user)])
+app.include_router(night_trains.router, dependencies=[Depends(require_user)])
+app.include_router(dashboard.router, dependencies=[Depends(require_user)])
+app.include_router(analysis.router, dependencies=[Depends(require_user)])
+app.include_router(operators.router, dependencies=[Depends(require_user)])
+app.include_router(metadata.router, dependencies=[Depends(require_user)])
+app.include_router(statistics.router, dependencies=[Depends(require_user)])
+app.include_router(internal.router, dependencies=[Depends(require_admin)])
+
+if predict is not None:
+    app.include_router(predict.router, dependencies=[Depends(require_user)])
+
 
 @app.get("/")
 def read_root():
-    return {"message": "API"}
+    return {
+        "message": "API",
+        "service": "ObRail API",
+        "version": app.version,
+        "predict_router_enabled": predict is not None,
+    }
+
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "predict_router_enabled": predict is not None,
+    }

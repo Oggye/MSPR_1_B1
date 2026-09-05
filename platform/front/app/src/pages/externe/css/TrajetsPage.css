@@ -1,4 +1,4 @@
-.train-search-container {
+.ob-trajets-page {
   max-width: 1400px;
   margin: 0 auto;
   padding: 20px;
@@ -6,386 +6,310 @@
   color: #17202a;
 }
 
-h1 {
-  color: #12263a;
-  border-bottom: 3px solid #1769aa;
-  padding-bottom: 10px;
+.ob-page-heading {
   margin-bottom: 25px;
 }
 
-/* Panneau de filtres */
-.filters-panel {
+.ob-page-heading h1 {
+  color: #12263a;
+  border-bottom: 3px solid #1769aa;
+  padding-bottom: 10px;
+  margin: 6px 0 10px;
+  font-size: 32px;
+}
+
+.ob-page-heading p {
+  margin: 0;
+  color: #52616f;
+  line-height: 1.5;
+}
+
+.ob-eyebrow {
+  color: #1769aa;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ob-filter-panel {
   background: #12263a;
   padding: 20px;
   border-radius: 8px;
-  margin-bottom: 30px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 20px;
-  align-items: flex-end;
+  margin-bottom: 20px;
   box-shadow: 0 1px 2px rgba(18, 38, 58, 0.08);
 }
 
-.filter-group {
-  flex: 1;
-  min-width: 180px;
+.ob-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
 }
 
-.filter-group label {
-  display: block;
+.ob-filter-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   color: white;
   font-weight: 600;
-  margin-bottom: 8px;
   font-size: 14px;
 }
 
-.filter-group input,
-.filter-group select {
+.ob-filter-grid input,
+.ob-filter-grid select {
+  width: 100%;
+  box-sizing: border-box;
   padding: 10px;
   border: 1px solid #c9d2dc;
   border-radius: 6px;
   font-size: 14px;
   background: white;
+  color: #17202a;
 }
 
-.filter-group input:focus,
-.filter-group select:focus {
+.ob-filter-grid input:focus,
+.ob-filter-grid select:focus {
   outline: none;
   border-color: #1769aa;
   box-shadow: 0 0 0 3px rgba(23, 105, 170, 0.18);
 }
 
-.radio-group {
+.ob-filter-actions {
   display: flex;
-  gap: 15px;
-  background: white;
-  padding: 8px 12px;
-  border-radius: 6px;
+  gap: 10px;
+  margin-top: 20px;
 }
 
-.radio-group label {
-  color: #17202a;
-  margin-bottom: 0;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  cursor: pointer;
-}
-
-.refresh-btn {
-  background: #1769aa;
-  color: white;
-  border: none;
+.ob-primary-button,
+.ob-secondary-button {
   padding: 10px 20px;
   border-radius: 6px;
   cursor: pointer;
+  font-size: 14px;
   font-weight: 600;
-  transition: all 0.3s;
+  transition: all 0.3s ease;
 }
 
-.refresh-btn:hover {
-  background: #12263a;
+.ob-primary-button {
+  background: #1769aa;
+  color: white;
+  border: none;
+}
+
+.ob-primary-button:hover {
+  background: #0f5489;
   transform: translateY(-2px);
 }
 
-/* Conteneur des résultats */
-.results-container {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 30px;
+.ob-secondary-button {
+  background: white;
+  color: #12263a;
+  border: 1px solid #c9d2dc;
 }
 
-.trains-list {
+.ob-secondary-button:hover { background: #edf2f7; }
+
+.ob-alert {
+  margin: 15px 0;
+  padding: 12px 16px;
+  border-radius: 8px;
+}
+
+.ob-alert--error {
+  background: #fdecec;
+  color: #8b2020;
+  border: 1px solid #efcaca;
+}
+
+.ob-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 15px;
+  margin: 20px 0;
+}
+
+.ob-kpi-card {
+  padding: 15px;
   background: #f4f6f8;
   border: 1px solid #dde5ed;
   border-radius: 8px;
-  padding: 20px;
-  max-height: 70vh;
-  overflow-y: auto;
+  transition: transform 0.3s ease;
 }
 
-.trains-list h2 {
-  margin-top: 0;
+.ob-kpi-card:hover { transform: translateY(-3px); }
+.ob-kpi-card:nth-child(2) { background: #12263a; color: white; }
+.ob-kpi-card:nth-child(3) { background: #1769aa; color: white; }
+.ob-kpi-card:nth-child(4) { background: #20a464; color: white; }
+
+.ob-kpi-card span,
+.ob-kpi-card small { display: block; font-size: 12px; opacity: 0.9; }
+.ob-kpi-card strong { display: block; margin: 5px 0; font-size: 24px; }
+
+.ob-insight {
+  background: white;
+  border: 1px solid #dde5ed;
+  border-left: 5px solid #1769aa;
+  border-radius: 8px;
+  padding: 15px 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 2px rgba(18, 38, 58, 0.04);
+}
+
+.ob-insight strong { color: #12263a; }
+.ob-insight p { color: #52616f; margin: 6px 0; }
+.ob-insight small { color: #6f7d89; }
+
+.ob-trajets-layout {
+  display: grid;
+  grid-template-columns: 1.4fr 0.6fr;
+  gap: 30px;
+  align-items: start;
+}
+
+.ob-panel {
+  background: white;
+  border: 1px solid #dde5ed;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(18, 38, 58, 0.04);
+}
+
+.ob-panel-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 20px;
+  background: #f4f6f8;
+  border-bottom: 1px solid #dde5ed;
+}
+
+.ob-panel-heading h2 {
+  margin: 0 0 5px;
   color: #12263a;
   font-size: 20px;
 }
 
-.loading, .error, .no-results {
-  text-align: center;
-  padding: 40px;
+.ob-panel-heading p {
+  margin: 0;
   color: #52616f;
+  font-size: 13px;
 }
 
-.error {
-  color: #8b2020;
+.ob-count-chip {
+  height: fit-content;
+  padding: 5px 10px;
+  border-radius: 20px;
+  background: #edf2f7;
+  color: #52616f;
+  font-size: 12px;
+  font-weight: 600;
 }
 
-/* Cartes des trains */
-.train-cards {
-  display: flex;
-  flex-direction: column;
-  gap: 15px;
+.ob-table-scroll {
+  max-height: 70vh;
+  overflow: auto;
 }
 
-.train-card {
-  background: white;
-  border-radius: 8px;
-  padding: 15px;
+.ob-data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ob-data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 12px;
+  text-align: left;
+  color: #52616f;
+  background: #f4f6f8;
+  font-size: 12px;
+  border-bottom: 2px solid #dde5ed;
+}
+
+.ob-data-table td {
+  padding: 12px;
+  font-size: 14px;
+  border-bottom: 1px solid #e6edf3;
+}
+
+.ob-data-table tbody tr {
   cursor: pointer;
-  transition: all 0.3s;
-  border: 1px solid #dde5ed;
-  box-shadow: 0 1px 2px rgba(18, 38, 58, 0.04);
+  background: white;
+  transition: background 0.2s;
 }
 
-.train-card:hover {
-  transform: translateX(5px);
-  box-shadow: 0 4px 12px rgba(18, 38, 58, 0.12);
-}
-
-.train-card.selected {
-  border-color: #1769aa;
+.ob-data-table tbody tr:hover,
+.ob-data-table tbody tr.is-selected {
   background: #edf2f7;
 }
 
-.train-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
+.ob-cell-subtitle {
+  display: block;
+  margin-top: 3px;
+  color: #6f7d89;
+  font-size: 11px;
 }
 
-.train-type-badge {
-  padding: 4px 12px;
+.ob-tag {
+  display: inline-block;
+  padding: 4px 10px;
   border-radius: 20px;
   font-size: 12px;
   font-weight: 600;
 }
 
-.train-type-badge[data-type="night"] {
-  background: #12263a;
-  color: #e7eef6;
+.ob-tag--night { background: #12263a; color: #e7eef6; }
+.ob-tag--day { background: #e5f7ed; color: #0d7a3b; }
+.ob-tag--real { background: #e5f7ed; color: #0d7a3b; }
+.ob-tag--synthetic { background: #fff8e5; color: #765000; }
+
+.ob-route-detail {
+  position: sticky;
+  top: 20px;
 }
 
-.train-type-badge[data-type="day"] {
-  background: #e5f7ed;
-  color: #0d7a3b;
-}
-
-.train-id {
-  font-size: 12px;
-  color: #52616f;
-}
-
-.train-body {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-
-.train-info strong {
-  color: #12263a;
-  font-size: 16px;
-}
-
-.train-info div {
-  font-size: 13px;
-  color: #5c6b78;
-  margin-top: 4px;
-}
-
-.route-preview {
-  text-align: right;
-  font-size: 13px;
-  color: #52616f;
-}
-
-.select-btn {
-  width: 100%;
-  padding: 8px;
-  background: #1769aa;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  transition: background 0.3s;
-}
-
-.select-btn:hover {
-  background: #12263a;
-}
-
-/* Détails de l'itinéraire */
-.route-details {
-  background: white;
-  border: 1px solid #dde5ed;
-  border-radius: 8px;
+.ob-detail-list {
+  margin: 0;
   padding: 20px;
-  box-shadow: 0 1px 2px rgba(18, 38, 58, 0.04);
-  max-height: 70vh;
-  overflow-y: auto;
 }
 
-.itinerary h2 {
-  margin-top: 0;
-  color: #12263a;
-  font-size: 22px;
-}
-
-.route-summary {
-  background: #f4f6f8;
-  padding: 15px;
-  border-radius: 8px;
-  margin: 20px 0;
+.ob-detail-list > div {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 10px;
-}
-
-.summary-item {
-  display: flex;
-  justify-content: space-between;
-  padding: 8px;
+  grid-template-columns: 130px 1fr;
+  gap: 12px;
+  padding: 10px 0;
   border-bottom: 1px solid #dde5ed;
 }
 
-.summary-item .label {
-  font-weight: 600;
+.ob-detail-list dt {
   color: #52616f;
-}
-
-.summary-item .value {
-  color: #12263a;
-}
-
-/* Étapes du voyage */
-.journey-stages {
-  margin: 20px 0;
-  position: relative;
-}
-
-.stage {
-  display: flex;
-  margin-bottom: 20px;
-  position: relative;
-}
-
-.stage-icon {
-  width: 40px;
-  height: 40px;
-  background: #1769aa;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: white;
-  font-size: 20px;
-  margin-right: 15px;
-  flex-shrink: 0;
-  z-index: 2;
-}
-
-.stage-start .stage-icon {
-  background: #20a464;
-}
-
-.stage-end .stage-icon {
-  background: #c43d3d;
-}
-
-.stage-intermediate .stage-icon {
-  background: #d98c00;
-}
-
-.stage-content {
-  flex: 1;
-  padding: 10px;
-  background: #f4f6f8;
-  border-radius: 8px;
-}
-
-.stage-city {
   font-weight: 600;
-  font-size: 16px;
+  font-size: 13px;
+}
+
+.ob-detail-list dd {
+  margin: 0;
   color: #12263a;
+  overflow-wrap: anywhere;
 }
 
-.stage-country, .stage-time {
-  font-size: 12px;
-  color: #52616f;
-  margin-top: 4px;
-}
-
-.stage-duration, .stage-distance {
-  font-size: 12px;
-  color: #1769aa;
-  margin-top: 4px;
-}
-
-.stage-line {
-  position: absolute;
-  left: 19px;
-  width: 2px;
-  background: #c9d2dc;
-  top: 40px;
-  bottom: -20px;
-  z-index: 1;
-}
-
-.stage-end .stage-line {
-  display: none;
-}
-
-/* Informations supplémentaires */
-.additional-info {
-  margin-top: 30px;
-  padding-top: 20px;
-  border-top: 2px solid #dde5ed;
-}
-
-.additional-info h3 {
-  color: #12263a;
-  margin-bottom: 15px;
-}
-
-.info-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 10px;
-}
-
-.info-item {
-  padding: 10px;
-  background: #f4f6f8;
-  border-radius: 6px;
-}
-
-.no-route-selected {
+.ob-loading-state,
+.ob-empty-state {
+  padding: 40px;
   text-align: center;
-  padding: 60px 20px;
-  color: #9aa9b5;
+  color: #52616f;
 }
 
-.placeholder-icon {
-  font-size: 80px;
-  margin-bottom: 20px;
+@media (max-width: 1024px) {
+  .ob-filter-grid { grid-template-columns: repeat(2, 1fr); }
+  .ob-kpi-grid { grid-template-columns: repeat(2, 1fr); }
+  .ob-trajets-layout { grid-template-columns: 1fr; gap: 20px; }
+  .ob-route-detail { position: static; }
 }
 
-/* Responsive */
 @media (max-width: 768px) {
-  .results-container {
-    grid-template-columns: 1fr;
-  }
-  
-  .filters-panel {
-    flex-direction: column;
-  }
-  
-  .filter-group {
-    width: 100%;
-  }
-  
-  .route-summary {
-    grid-template-columns: 1fr;
-  }
+  .ob-trajets-page { padding: 10px; }
+  .ob-filter-grid,
+  .ob-kpi-grid { grid-template-columns: 1fr; }
 }

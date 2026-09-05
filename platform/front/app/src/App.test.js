@@ -15,6 +15,10 @@ jest.mock('./routes/index', () => function MockAppRoutes() {
   );
 });
 
+jest.mock('./auth/AuthContext', () => ({
+  AuthProvider: ({ children }) => <>{children}</>,
+}));
+
 test('renders the real home page entry points', async () => {
   render(<App />);
 

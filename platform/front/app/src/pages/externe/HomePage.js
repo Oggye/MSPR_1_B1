@@ -1,351 +1,279 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
-  Chart as ChartJS,
   CategoryScale,
+  Chart as ChartJS,
+  Legend,
+  LineElement,
   LinearScale,
   PointElement,
-  LineElement,
-  Title,
   Tooltip,
-  Legend,
-  Filler
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
-import { getSummary, getTimeline, getDashboardKpis } from '../../services/api';
+
+import {
+  getDashboardKpis,
+  getGeographicCoverage,
+  getSummary,
+  getTimeline,
+} from '../../services/api';
 
 import './css/HomePage.css';
 
-// Enregistrement des composants Chart.js
 ChartJS.register(
   CategoryScale,
   LinearScale,
   PointElement,
   LineElement,
-  Title,
   Tooltip,
   Legend,
-  Filler
 );
+
+const formatNumber = value => Number(value || 0).toLocaleString('fr-FR');
 
 export default function ExterneHomePage() {
   const [summary, setSummary] = useState(null);
   const [timeline, setTimeline] = useState([]);
   const [kpis, setKpis] = useState(null);
+  const [coverage, setCoverage] = useState(null);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [resSummary, resTimeline, resKpis] = await Promise.all([
-          getSummary(),
-          getTimeline(),
-          getDashboardKpis()
-        ]);
-
-        setSummary(resSummary.data);
-        setTimeline(resTimeline.data);
-        setKpis(resKpis.data);
-      } catch (error) {
-        console.error(error);
-      }
-    };
-
-    fetchData();
+    Promise.all([
+      getSummary(),
+      getTimeline(),
+      getDashboardKpis(),
+      getGeographicCoverage(),
+    ])
+      .then(([
+        summaryResponse,
+        timelineResponse,
+        kpiResponse,
+        coverageResponse,
+      ]) => {
+        setSummary(summaryResponse.data);
+        setTimeline(timelineResponse.data || []);
+        setKpis(kpiResponse.data);
+        setCoverage(coverageResponse.data);
+      })
+      .catch(err => {
+        console.error(err);
+        setError('Impossible de charger le dashboard.');
+      });
   }, []);
 
-  // Préparer les données pour Chart.js
-  const years = timeline.map(item => item.year);
 
-  const passengers = timeline.map(
-    item => (item.passengers || 0) / 1000000
+  const timeline2010To2024 = useMemo(
+    () => timeline.filter(item => (
+      Number(item.year) >= 2010 && Number(item.year) <= 2024
+    )),
+    [timeline],
   );
 
-  const co2Emissions = timeline.map(
-    item => (item.co2_emissions || 0) / 1000
-  );
+  const synthesis = useMemo(() => {
+    if (!summary || summary.total_trains <= 0) return null;
 
-  const chartData = {
-    labels: years,
+    return {
+      nightShare: (
+        summary.total_night_trains / summary.total_trains
+      ) * 100,
+      syntheticShare: (
+        summary.total_synthetic_trains / summary.total_trains
+      ) * 100,
+    };
+  }, [summary]);
+
+  const activityChart = {
+    labels: timeline2010To2024.map(item => item.year),
     datasets: [
       {
-        label: 'Passagers (millions)',
-        data: passengers,
-        borderColor: '#3498db',
-        backgroundColor: 'rgba(52, 152, 219, 0.1)',
-        borderWidth: 3,
-        pointRadius: 6,
-        pointHoverRadius: 8,
-        pointBackgroundColor: '#3498db',
-        pointBorderColor: '#fff',
-        pointBorderWidth: 2,
-        tension: 0.4,
-        fill: true,
+        label: 'Activité voyageurs (MIO_PKM)',
+        data: timeline2010To2024.map(item => item.passengers),
+        borderColor: '#1769aa',
+        backgroundColor: 'rgba(23, 105, 170, 0.10)',
         yAxisID: 'y',
+        tension: 0.3,
+        spanGaps: true,
       },
       {
-        label: 'Émissions CO₂ (milliers de tonnes)',
-        data: co2Emissions,
-        borderColor: '#2ecc71',
-        backgroundColor: 'rgba(46, 204, 113, 0.1)',
-        borderWidth: 3,
-        borderDash: [8, 4],
-        pointRadius: 6,
-        pointHoverRadius: 8,
-        pointBackgroundColor: '#2ecc71',
-        pointBorderColor: '#fff',
-        pointBorderWidth: 2,
-        tension: 0.4,
-        fill: true,
+        label: 'CO₂ national (MIO_T)',
+        data: timeline2010To2024.map(item => item.co2_emissions),
+        borderColor: '#22c55e',
+        backgroundColor: 'rgba(34, 197, 94, 0.10)',
         yAxisID: 'y1',
-      }
-    ]
+        tension: 0.3,
+        spanGaps: true,
+      },
+    ],
   };
 
-  const chartOptions = {
+  const trainChart = {
+    labels: timeline2010To2024.map(item => item.year),
+    datasets: [
+      {
+        label: 'Trajets de jour',
+        data: timeline2010To2024.map(item => item.day_trains_count),
+        borderColor: '#1769aa',
+        backgroundColor: 'rgba(23, 105, 170, 0.10)',
+        tension: 0.3,
+      },
+      {
+        label: 'Trajets de nuit',
+        data: timeline2010To2024.map(item => item.night_trains_count),
+        borderColor: '#7e22ce',
+        backgroundColor: 'rgba(126, 34, 206, 0.10)',
+        tension: 0.3,
+      },
+    ],
+  };
+
+  const activityOptions = {
     responsive: true,
-    maintainAspectRatio: true,
-
-    interaction: {
-      mode: 'index',
-      intersect: false,
-    },
-
-    plugins: {
-      tooltip: {
-        callbacks: {
-          label: function (context) {
-            let label = context.dataset.label || '';
-            let value = context.raw;
-
-            if (context.dataset.label.includes('Passagers')) {
-              return `${label}: ${value.toFixed(1)} millions`;
-            } else {
-              return `${label}: ${value.toFixed(0)} milliers de tonnes`;
-            }
-          }
-        }
-      },
-
-      legend: {
-        position: 'bottom',
-
-        labels: {
-          usePointStyle: true,
-          padding: 20,
-
-          font: {
-            size: 12
-          }
-        }
-      },
-
-      title: {
-        display: false
-      }
-    },
-
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
     scales: {
       y: {
         type: 'linear',
-        display: true,
         position: 'left',
-
-        title: {
-          display: true,
-          text: 'Passagers (millions)',
-          color: '#3498db',
-
-          font: {
-            weight: 'bold',
-            size: 12
-          }
-        },
-
-        ticks: {
-          callback: function (value) {
-            return value.toFixed(0) + 'M';
-          }
-        },
-
-        grid: {
-          drawOnChartArea: true,
-          color: '#e0e0e0',
-          borderDash: [5, 5]
-        }
+        title: { display: true, text: 'MIO_PKM' },
       },
-
       y1: {
         type: 'linear',
-        display: true,
         position: 'right',
-
-        title: {
-          display: true,
-          text: 'Émissions CO₂ (milliers de tonnes)',
-          color: '#2ecc71',
-
-          font: {
-            weight: 'bold',
-            size: 12
-          }
-        },
-
-        ticks: {
-          callback: function (value) {
-            return value.toFixed(0) + 'k';
-          }
-        },
-
-        grid: {
-          drawOnChartArea: false,
-        }
+        grid: { drawOnChartArea: false },
+        title: { display: true, text: 'MIO_T CO₂' },
       },
-
-      x: {
-        title: {
-          display: true,
-          text: 'Année',
-
-          font: {
-            weight: 'bold',
-            size: 12
-          }
-        },
-
-        grid: {
-          color: '#e0e0e0',
-          borderDash: [5, 5]
-        }
-      }
     },
-
-    elements: {
-      line: {
-        fill: true,
-      },
-
-      point: {
-        hoverRadius: 8,
-      }
-    }
   };
 
+  const trainOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      y: {
+        beginAtZero: true,
+        title: { display: true, text: 'Nombre de trajets' },
+      },
+    },
+  };
+
+  const latestYear = timeline2010To2024.length
+    ? timeline2010To2024[timeline2010To2024.length - 1].year
+    : null;
+
   return (
-    <div className="homepage-container">
-      <h1 className="homepage-title">Dashboard</h1>
+    <div className="ob-home-page">
+      <header className="ob-home-heading">
+        <span>ObRail Europe</span>
+        <h1>Vue d'ensemble</h1>
+        <p>
+          Une lecture synthétique du warehouse : volumes, couverture,
+          provenance des données et évolution temporelle.
+        </p>
+      </header>
 
-      {/* KPI Cards */}
-      <div className="kpi-grid">
+      {error && <div className="ob-home-alert">{error}</div>}
 
-        <div className="kpi-card trains">
-          <h3>🚆 Trains</h3>
+      <section className="ob-home-kpis">
+        <article>
+          <span>Trajets</span>
+          <strong>{formatNumber(summary?.total_trains)}</strong>
+          <small>jour + nuit</small>
+        </article>
+        <article>
+          <span>Pays couverts</span>
+          <strong>{coverage?.total_countries_covered || 0}</strong>
+          <small>avec au moins un trajet</small>
+        </article>
+        <article>
+          <span>Opérateurs</span>
+          <strong>{formatNumber(kpis?.total_operators)}</strong>
+          <small>référencés</small>
+        </article>
+        <article>
+          <span>Période</span>
+          <strong>2010-2024</strong>
+          <small>{latestYear ? `dernière année : ${latestYear}` : ''}</small>
+        </article>
+      </section>
 
-          <p>
-            {summary?.total_trains?.toLocaleString() || 0}
-          </p>
-        </div>
-
-        <div className="kpi-card night">
-          <h3>🌙 Nuit</h3>
-
-          <p>
-            {summary?.total_night_trains?.toLocaleString() || 0}
-          </p>
-        </div>
-
-        <div className="kpi-card day">
-          <h3>☀️ Jour</h3>
-
-          <p>
-            {summary?.total_day_trains?.toLocaleString() || 0}
-          </p>
-        </div>
-
-        <div className="kpi-card countries">
-          <h3>🌍 Pays</h3>
-
-          <p>
-            {kpis?.total_countries?.toLocaleString() || 0}
-          </p>
-        </div>
-      </div>
-
-      {/* Statistiques supplémentaires */}
-      <div className="stats-grid">
-
-        <div className="stats-card">
-          <h3>📊 Indicateurs Clés</h3>
-
-          <div style={{ marginBottom: '15px' }}>
-            <span className="stat-label">
-              CO₂ moyen par passager
-            </span>
-
-            <p className="stat-value green">
-              {kpis?.avg_co2_per_passenger?.toFixed(3) || 0} kg
-            </p>
-          </div>
-
-          <div style={{ marginBottom: '15px' }}>
-            <span className="stat-label">
-              Total passagers
-            </span>
-
-            <p className="stat-value blue">
-              {(kpis?.total_passengers / 1000000)?.toFixed(1) || 0} millions
-            </p>
-          </div>
-
+      <section className="ob-home-summary-grid">
+        <article className="ob-home-summary-card">
+          <h2>Composition du réseau</h2>
+          <div><span>Jour</span><strong>{formatNumber(summary?.total_day_trains)}</strong></div>
+          <div><span>Nuit</span><strong>{formatNumber(summary?.total_night_trains)}</strong></div>
           <div>
-            <span className="stat-label">
-              Total émissions CO₂
-            </span>
-
-            <p className="stat-value orange">
-              {(kpis?.total_co2_emissions / 1000)?.toFixed(0) || 0} kt
-            </p>
+            <span>Part nocturne</span>
+            <strong>
+              {synthesis ? `${synthesis.nightShare.toFixed(1)} %` : '0 %'}
+            </strong>
           </div>
-        </div>
+        </article>
 
-        <div className="stats-card">
-          <h3>📅 Période couverte</h3>
-
+        <article className="ob-home-summary-card">
+          <h2>Origine des données</h2>
+          <div><span>Réelles</span><strong>{formatNumber(summary?.total_real_trains)}</strong></div>
+          <div><span>Synthétiques</span><strong>{formatNumber(summary?.total_synthetic_trains)}</strong></div>
           <div>
-            <span className="stat-label">
-              Années d'analyse
-            </span>
-
-            <p className="stat-value purple">
-              {kpis?.years_covered || '2010-2024'}
-            </p>
+            <span>Part synthétique</span>
+            <strong>
+              {synthesis ? `${synthesis.syntheticShare.toFixed(1)} %` : '0 %'}
+            </strong>
           </div>
+        </article>
 
-          <div style={{ marginTop: '15px' }}>
-            <span className="stat-label">
-              Opérateurs
-            </span>
-
-            <p className="stat-value red">
-              {kpis?.total_operators?.toLocaleString() || 0}
-            </p>
+        <article className="ob-home-summary-card">
+          <h2>Indicateurs statistiques</h2>
+          <div>
+            <span>Activité voyageurs cumulée</span>
+            <strong>{formatNumber(kpis?.total_passengers)} MIO_PKM</strong>
           </div>
-        </div>
-      </div>
+          <div>
+            <span>CO₂ cumulé</span>
+            <strong>{formatNumber(kpis?.total_co2_emissions)} MIO_T</strong>
+          </div>
+          <div>
+            <span>Ratio CO₂ / activité</span>
+            <strong>
+              {kpis?.avg_co2_per_passenger != null
+                ? Number(kpis.avg_co2_per_passenger).toFixed(4)
+                : '—'}
+            </strong>
+          </div>
+        </article>
+      </section>
 
-      {/* Graphique */}
-      <div className="chart-container-homepage">
+      <section className="ob-home-insight">
+        <strong>Comment lire ces chiffres</strong>
+        <p>
+          Les trajets réels proviennent des sources GTFS et Back on Track.
+          Les trajets synthétiques complètent les pays sans dataset détaillé.
+          Les valeurs voyageurs sont exprimées en millions de passager-km
+          (MIO_PKM), pas en nombre brut de personnes.
+        </p>
+      </section>
 
-        <h1 className="chart-title">
-          📈 Évolution temporelle
-        </h1>
+      <section className="ob-home-charts">
+        <article className="ob-home-chart-card">
+          <div>
+            <h2>Évolution de l'activité et du CO₂</h2>
+            <p>Deux axes séparés afin de ne pas mélanger des unités différentes.</p>
+          </div>
+          <div className="ob-home-chart">
+            <Line data={activityChart} options={activityOptions} />
+          </div>
+        </article>
 
-        <h3 className="chart-subtitle">
-          Évolution des passagers et émissions CO₂
-        </h3>
-
-        <div className="chart-box">
-          <Line data={chartData} options={chartOptions} />
-        </div>
-      </div>
+        <article className="ob-home-chart-card">
+          <div>
+            <h2>Évolution jour / nuit</h2>
+            <p>Comptages réellement retournés par l'API.</p>
+          </div>
+          <div className="ob-home-chart">
+            <Line data={trainChart} options={trainOptions} />
+          </div>
+        </article>
+      </section>
     </div>
   );
 }

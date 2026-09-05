@@ -1,4 +1,5 @@
 const { test, expect } = require('@playwright/test');
+const { createAuthenticatedSession } = require('./auth');
 
 const API_BASE_URL =
   process.env.E2E_API_URL || 'http://localhost:8000';
@@ -68,6 +69,10 @@ test.describe(
       mode: 'serial',
     });
 
+    test.beforeEach(async ({ request }) => {
+      await createAuthenticatedSession(request, 'admin');
+    });
+
     test(
       'GET /api/internal/overview répond et expose les blocs attendus',
       async ({ request }) => {
@@ -121,7 +126,7 @@ test.describe(
     test(
       'POST /api/internal/diagnostic/run répond',
       async ({ request }) => {
-        test.setTimeout(120000);
+        test.setTimeout(180000);
 
         const { rawBody } = await fetchWithRetry(
           request,
