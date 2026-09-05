@@ -1,4 +1,7 @@
-const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:8000";
+const configuredApiUrl = process.env.REACT_APP_API_URL || process.env.REACT_APP_API_BASE_URL;
+const API_BASE_URL = configuredApiUrl
+  ? configuredApiUrl.replace(/\/api\/?$/, "")
+  : "http://localhost:8000";
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {

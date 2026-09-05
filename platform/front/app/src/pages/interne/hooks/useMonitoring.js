@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { emptyOverview } from "../../../services/mockData";
 import { getInternalOverview, runInternalDiagnostic, streamInternalTestsCategory } from "../../../services/api_interne";
 
@@ -22,6 +22,7 @@ const initialTestsState = TEST_CATEGORIES.reduce((acc, item) => {
 }, {});
 
 export function useMonitoring(refreshMs = 30000) {
+  const autoDiagnosticAttempted = useRef(false);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -88,6 +89,16 @@ export function useMonitoring(refreshMs = 30000) {
               const prev = current.tests?.[category] || {};
               const nextLines = payload.kind === "log" ? [...(prev.lines || []), payload.line] : (prev.lines || []);
               let nextStatus = prev.status || "running";
+              let nextSummary = prev.summary || {};
+              if (payload.kind === "log") {
+                const passed = payload.line.match(/(\d+)\s+passed/i);
+                const failed = payload.line.match(/(\d+)\s+failed/i);
+                nextSummary = {
+                  ...nextSummary,
+                  ...(passed ? { passed: Number(passed[1]) } : {}),
+                  ...(failed ? { failed: Number(failed[1]) } : {}),
+                };
+              }
               if (payload.kind === "section_end") {
                 nextStatus = payload.line.includes(": ok") ? "passed" : "failed";
               }
@@ -100,6 +111,8 @@ export function useMonitoring(refreshMs = 30000) {
                     lines: nextLines,
                     count: nextLines.length,
                     status: nextStatus,
+                    summary: nextSummary,
+                    lastRun: payload.kind === "section_end" ? payload.time : prev.lastRun,
                   },
                 },
               };
@@ -146,6 +159,18 @@ export function useMonitoring(refreshMs = 30000) {
     const interval = window.setInterval(refresh, refreshMs);
     return () => window.clearInterval(interval);
   }, [refresh, refreshMs]);
+
+  useEffect(() => {
+    if (
+      !loading
+      && data?.reports?.diagnostic_meta?.stale
+      && !actionState.runningDiagnostic
+      && !autoDiagnosticAttempted.current
+    ) {
+      autoDiagnosticAttempted.current = true;
+      runDiagnostic();
+    }
+  }, [actionState.runningDiagnostic, data, loading, runDiagnostic]);
 
   return {
     data,

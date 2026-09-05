@@ -17,21 +17,28 @@ RAW_DIR = BASE_DIR / "data" / "raw"
 PROCESSED_DIR = BASE_DIR / "data" / "processed"
 WAREHOUSE_DIR = BASE_DIR / "data" / "warehouse"
 
-# Mapping des sources -> dossiers raw
-RAW_SOURCES = {
-    "back_on_track": RAW_DIR / "back_on_track",
-    "eurostat": RAW_DIR / "eurostat",
-    "emission_co2": RAW_DIR / "emission_co2",
-    "gtfs_fr": RAW_DIR / "gtfs_fr",
-    "gtfs_ch": RAW_DIR / "gtfs_ch",
-    "gtfs_de": RAW_DIR / "gtfs_de",
-}
+def lister_sources_raw():
+    """Retourne les sources RAW reellement presentes sur disque."""
+    if not RAW_DIR.exists():
+        return {}
+    return {
+        dossier.name: dossier
+        for dossier in sorted(RAW_DIR.iterdir())
+        if dossier.is_dir()
+    }
 
 def compter_lignes_csv(chemin):
     """Compte les lignes d'un CSV de manière efficace"""
     try:
-        with open(chemin, 'r', encoding='utf-8', errors='ignore') as f:
-            return sum(1 for _ in f) - 1  # -1 pour l'en-tête
+        lignes = 0
+        dernier_octet = b''
+        with open(chemin, 'rb') as f:
+            for bloc in iter(lambda: f.read(1024 * 1024), b''):
+                lignes += bloc.count(b'\n')
+                dernier_octet = bloc[-1:]
+        if dernier_octet and dernier_octet != b'\n':
+            lignes += 1
+        return max(lignes - 1, 0)  # -1 pour l'en-tête
     except:
         return None
 
@@ -74,7 +81,7 @@ def diagnostiquer_raw():
     total_fichiers = 0
     total_lignes = 0
     
-    for source, dossier in RAW_SOURCES.items():
+    for source, dossier in lister_sources_raw().items():
         print(f"\n📁 {source.upper()}")
         print("-" * 50)
         
@@ -317,7 +324,7 @@ def verifier_coherence(raw_stats, processed_stats, warehouse_stats):
     
     return len(alerts) == 0
 
-def generer_rapport_json(raw_stats, processed_stats, warehouse_stats, chemin_rapport=None):
+def generer_rapport_json(raw_stats, processed_stats, warehouse_stats, coherence_ok, chemin_rapport=None):
     """Génère un rapport JSON complet du diagnostic"""
     if chemin_rapport is None:
         chemin_rapport = BASE_DIR / "data" / "audit" / "diagnostic_report.json"
@@ -359,7 +366,7 @@ def generer_rapport_json(raw_stats, processed_stats, warehouse_stats, chemin_rap
         'raw': convertir_stats(raw_stats),
         'processed': convertir_stats(processed_stats),
         'warehouse': convertir_stats(warehouse_stats),
-        'statut': 'OK'
+        'statut': 'OK' if coherence_ok else 'A_VERIFIER'
     }
     
     import json
@@ -370,6 +377,8 @@ def generer_rapport_json(raw_stats, processed_stats, warehouse_stats, chemin_rap
 
 def main():
     """Fonction principale du diagnostic"""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print("="*70)
     print("🔬 DIAGNOSTIC COMPLET DU PIPELINE ETL OBRAIL EUROPE")
     print(f"📅 Date : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -388,7 +397,7 @@ def main():
     coherence_ok = verifier_coherence(raw_stats, processed_stats, warehouse_stats)
     
     # Rapport JSON
-    generer_rapport_json(raw_stats, processed_stats, warehouse_stats)
+    generer_rapport_json(raw_stats, processed_stats, warehouse_stats, coherence_ok)
     
     # Résumé final
     print("\n" + "="*70)

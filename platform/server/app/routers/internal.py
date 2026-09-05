@@ -20,11 +20,6 @@ router = APIRouter(prefix="/api/internal", tags=["internal"])
 
 APP_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = APP_DIR.parents[2] if len(APP_DIR.parents) > 2 else Path("/app")
-QUALITY_REPORT = APP_DIR / "reports" / "quality_reports.json"
-DIAGNOSTIC_REPORTS = [
-    PROJECT_ROOT / "data" / "audit" / "diagnostic_report.json",
-    Path("/app/data/audit/diagnostic_report.json"),
-]
 IA_MODELS_DIR = PROJECT_ROOT / "ia" / "models"
 IA_MANIFEST = IA_MODELS_DIR / "forecast_manifest.json"
 IA_CLASSIFIER = IA_MODELS_DIR / "forecast_classifier.joblib"
@@ -55,6 +50,73 @@ def _read_json(path):
     except Exception as exc:
         return {"error": str(exc), "path": str(path)}
     return None
+
+
+def _data_report_candidates(*parts):
+    return [
+        PROJECT_ROOT / "data" / Path(*parts),
+        Path("/app/data") / Path(*parts),
+    ]
+
+
+def _first_report(paths):
+    for path in paths:
+        report = _read_json(path)
+        if report is not None:
+            return report, path
+    return None, None
+
+
+def _latest_data_mtime_ns():
+    data_root = next(
+        (path for path in [PROJECT_ROOT / "data", Path("/app/data")] if path.exists()),
+        None,
+    )
+    if not data_root:
+        return None
+
+    latest = None
+    for directory_name in ("raw", "processed", "warehouse"):
+        directory = data_root / directory_name
+        if not directory.exists():
+            continue
+        for path in directory.rglob("*"):
+            try:
+                if path.is_file():
+                    mtime = path.stat().st_mtime_ns
+                    latest = mtime if latest is None else max(latest, mtime)
+            except OSError:
+                continue
+    return latest
+
+
+def _report_metadata(path, latest_data_mtime_ns=None):
+    if not path or not path.exists():
+        return {
+            "available": False,
+            "stale": True,
+            "report_modified_at": None,
+            "latest_data_at": None,
+        }
+
+    report_mtime_ns = path.stat().st_mtime_ns
+    return {
+        "available": True,
+        "stale": bool(
+            latest_data_mtime_ns and report_mtime_ns < latest_data_mtime_ns
+        ),
+        "report_modified_at": datetime.fromtimestamp(
+            report_mtime_ns / 1_000_000_000
+        ).isoformat(timespec="seconds"),
+        "latest_data_at": (
+            datetime.fromtimestamp(
+                latest_data_mtime_ns / 1_000_000_000
+            ).isoformat(timespec="seconds")
+            if latest_data_mtime_ns
+            else None
+        ),
+        "path": str(path),
+    }
 
 
 def _http_json(url, timeout=2):
@@ -285,13 +347,21 @@ def _quick_diagnostic_report(reason=None):
 
 
 def _reports_summary():
-    quality = _read_json(QUALITY_REPORT) or {}
-    diagnostic = None
-    for path in DIAGNOSTIC_REPORTS:
-        diagnostic = _read_json(path)
-        if diagnostic:
-            break
-    return {"quality": quality, "diagnostic": diagnostic}
+    quality, quality_path = _first_report(
+        _data_report_candidates("warehouse", "quality_reports.json")
+    )
+    diagnostic, diagnostic_path = _first_report(
+        _data_report_candidates("audit", "diagnostic_report.json")
+    )
+    latest_data_mtime_ns = _latest_data_mtime_ns()
+    return {
+        "quality": quality or {},
+        "quality_meta": _report_metadata(quality_path),
+        "diagnostic": diagnostic,
+        "diagnostic_meta": _report_metadata(
+            diagnostic_path, latest_data_mtime_ns
+        ),
+    }
 
 
 def _ia_summary():
@@ -498,12 +568,38 @@ def run_diagnostic():
             "ran_at": _now(),
         }
 
-    result = _run_command([sys.executable, str(script)], cwd=str(script.parents[2]), timeout=60)
-    report = _reports_summary().get("diagnostic")
-    if not report:
-        report = _quick_diagnostic_report(result.get("error") or result.get("stderr"))
-        result["fallback"] = "quick_diagnostic_report"
+    report_candidates = _data_report_candidates("audit", "diagnostic_report.json")
+    mtimes_before = {
+        path: path.stat().st_mtime_ns
+        for path in report_candidates
+        if path.exists()
+    }
+    result = _run_command([sys.executable, str(script)], cwd=str(script.parents[2]), timeout=120)
+    fresh_path = next(
+        (
+            path
+            for path in report_candidates
+            if path.exists()
+            and path.stat().st_mtime_ns > mtimes_before.get(path, -1)
+        ),
+        None,
+    )
+
+    if not result.get("success"):
+        result["report"] = None
+        result["stale_report_ignored"] = any(path.exists() for path in report_candidates)
+        return result
+
+    report = _read_json(fresh_path) if fresh_path else None
+    if not isinstance(report, dict) or report.get("error"):
+        result["success"] = False
+        result["error"] = "Le diagnostic n'a pas produit de nouveau rapport JSON valide."
+        result["report"] = None
+        result["stale_report_ignored"] = any(path.exists() for path in report_candidates)
+        return result
+
     result["report"] = report
+    result["report_meta"] = _report_metadata(fresh_path, _latest_data_mtime_ns())
     return result
 
 

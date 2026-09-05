@@ -21,10 +21,12 @@ module.exports = defineConfig({
     },
     {
       name: 'tablet',
+      testIgnore: /internal-endpoints\.spec\.js/,
       use: { ...devices['iPad (gen 7)'], browserName: 'chromium' },
     },
     {
       name: 'mobile',
+      testIgnore: /internal-endpoints\.spec\.js/,
       use: { ...devices['Pixel 5'], browserName: 'chromium' },
     },
   ],

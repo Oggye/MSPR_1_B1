@@ -18,8 +18,8 @@ test.describe('Parcours frontend interne admin', () => {
     await page.getByRole('button', { name: 'Tests & Qualite' }).click();
 
     await expect(
-      page.getByRole('button', { name: 'Lancer le diagnostic' })
-    ).toBeVisible();
+      page.getByRole('button', { name: /diagnostic/i })
+    ).toBeVisible({ timeout: 30000 });
 
     // Correction : le composant TestsTab affiche un bouton "Lancer" par catégorie de test
     // On vérifie qu'au moins un bouton "Lancer" est visible

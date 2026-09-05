@@ -45,6 +45,55 @@ def test_scan_csv_dir_handles_missing_directory(tmp_path):
     }
 
 
+def test_report_metadata_marks_report_older_than_data_as_stale(tmp_path):
+    report = tmp_path / "diagnostic.json"
+    report.write_text("{}", encoding="utf-8")
+
+    result = internal._report_metadata(report, report.stat().st_mtime_ns + 1)
+
+    assert result["available"] is True
+    assert result["stale"] is True
+
+
+def test_reports_summary_uses_generated_warehouse_quality(tmp_path, monkeypatch):
+    quality_path = tmp_path / "data" / "warehouse" / "quality_reports.json"
+    quality_path.parent.mkdir(parents=True)
+    quality_path.write_text(json.dumps({"summary": {"total_sources_processed": 8}}), encoding="utf-8")
+    monkeypatch.setattr(internal, "PROJECT_ROOT", tmp_path)
+
+    result = internal._reports_summary()
+
+    assert result["quality"]["summary"]["total_sources_processed"] == 8
+    assert result["quality_meta"]["path"] == str(quality_path)
+
+
+def test_run_diagnostic_ignores_previous_report_on_failure(tmp_path, monkeypatch):
+    script = tmp_path / "etl" / "audit" / "diagnostic.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("raise SystemExit(1)", encoding="utf-8")
+    report = tmp_path / "data" / "audit" / "diagnostic_report.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({"date_diagnostic": "old"}), encoding="utf-8")
+    monkeypatch.setattr(internal, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        internal,
+        "_run_command",
+        lambda *args, **kwargs: {
+            "available": True,
+            "success": False,
+            "returncode": 1,
+            "stderr": "failure",
+            "ran_at": "now",
+        },
+    )
+
+    result = internal.run_diagnostic()
+
+    assert result["success"] is False
+    assert result["report"] is None
+    assert result["stale_report_ignored"] is True
+
+
 def test_run_command_reports_success():
     result = internal._run_command(["python", "--version"], timeout=10)
 

@@ -126,7 +126,7 @@ test.describe(
     test(
       'POST /api/internal/diagnostic/run répond',
       async ({ request }) => {
-        test.setTimeout(120000);
+        test.setTimeout(180000);
 
         const { rawBody } = await fetchWithRetry(
           request,

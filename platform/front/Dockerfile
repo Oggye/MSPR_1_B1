@@ -15,6 +15,9 @@ RUN npm install
 # Copier le reste du projet
 COPY app/. .
 
+# En production Docker, l'API est exposee sur la meme origine via Nginx.
+ENV REACT_APP_API_BASE_URL=/api
+
 # Build production
 RUN npm run build
 
