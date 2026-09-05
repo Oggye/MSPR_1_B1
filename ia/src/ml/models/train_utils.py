@@ -127,20 +127,235 @@ def _print_quality_summary(df: pd.DataFrame):
     print(f"   Qualité source : {counts}")
 
 
-def _single_horizon_compatibility_view(df: pd.DataFrame, target: str):
+def _single_horizon_compatibility_view(
+    df: pd.DataFrame,
+    target: str,
+):
+    """
+    Construit une vue N+1 compatible avec les benchmarks historiques.
+
+    Production actuelle :
+        prédiction directe multi-horizon N+1 / N+2 / N+3.
+
+    Benchmark historique :
+        - année cible = N
+        - passengers_lag1 = passengers(N-1)
+        - passengers_lag2 = passengers(N-2)
+        - classification historique :
+              en_declin = 1 si passengers(N) < passengers(N-2)
+
+    Le dataset classification multi-horizon ne contient volontairement
+    pas target_passengers. Pour reconstruire exactement l'ancienne cible
+    à des fins de benchmark, cette valeur est récupérée dans le dataset
+    régression correspondant.
+
+    Cette fonction ne modifie PAS la logique de production.
+    """
+
     if "horizon" not in df.columns:
         return df
 
+    # ------------------------------------------------------------------
+    # Les anciens benchmarks correspondent uniquement à l'horizon N+1.
+    # ------------------------------------------------------------------
+
     df = df.loc[df["horizon"] == 1].copy()
-    df["passengers_lag1"] = df["passengers"]
-    df["passengers_lag2"] = df["passengers_previous"]
-    df["passengers_growth_lag"] = df["passenger_growth_1y"]
-    df["co2_emissions_lag1"] = df["co2_emissions"]
-    df["co2_emissions_lag2"] = df["co2_previous"]
-    df["co2_growth_lag"] = df["co2_growth_1y"]
-    df["year"] = df["target_year"]
+
+    # ------------------------------------------------------------------
+    # Si on travaille sur la classification, target_passengers n'est pas
+    # présent dans classification_dataset_multihorizon.csv.
+    #
+    # On le récupère donc depuis regression_dataset_multihorizon.csv.
+    # Les deux datasets proviennent exactement des mêmes exemples
+    # pays / année cible / horizon.
+    # ------------------------------------------------------------------
+
+    if target == CLF_TARGET and "target_passengers" not in df.columns:
+        regression_df = pd.read_csv(
+            REGRESSION_DATASET_PATH,
+            low_memory=False,
+        )
+
+        regression_df = regression_df.loc[
+            regression_df["horizon"] == 1
+        ].copy()
+
+        merge_keys = [
+            "country_id",
+            "target_year",
+            "horizon",
+        ]
+
+        missing_keys_clf = [
+            column
+            for column in merge_keys
+            if column not in df.columns
+        ]
+
+        missing_keys_reg = [
+            column
+            for column in merge_keys + ["target_passengers"]
+            if column not in regression_df.columns
+        ]
+
+        if missing_keys_clf:
+            raise ValueError(
+                "Impossible de reconstruire le benchmark classification. "
+                f"Colonnes manquantes dans le dataset classification : "
+                f"{missing_keys_clf}"
+            )
+
+        if missing_keys_reg:
+            raise ValueError(
+                "Impossible de reconstruire le benchmark classification. "
+                f"Colonnes manquantes dans le dataset régression : "
+                f"{missing_keys_reg}"
+            )
+
+        target_lookup = regression_df[
+            merge_keys + ["target_passengers"]
+        ].copy()
+
+        # Sécurité : une seule target par pays / année / horizon.
+        if target_lookup.duplicated(subset=merge_keys).any():
+            duplicates = target_lookup.loc[
+                target_lookup.duplicated(
+                    subset=merge_keys,
+                    keep=False,
+                ),
+                merge_keys,
+            ]
+
+            raise ValueError(
+                "Doublons détectés lors de la reconstruction "
+                "de target_passengers : "
+                f"{duplicates.head().to_dict(orient='records')}"
+            )
+
+        df = df.merge(
+            target_lookup,
+            on=merge_keys,
+            how="left",
+            validate="1:1",
+        )
+
+        if df["target_passengers"].isna().any():
+            missing_rows = df.loc[
+                df["target_passengers"].isna(),
+                merge_keys,
+            ]
+
+            raise ValueError(
+                "Certaines valeurs target_passengers n'ont pas pu être "
+                "retrouvées depuis le dataset régression : "
+                f"{missing_rows.head().to_dict(orient='records')}"
+            )
+
+    # ------------------------------------------------------------------
+    # Reconstruction des features historiques.
+    #
+    # Pour une ligne horizon = 1 :
+    #
+    #   target_year         = N
+    #   passengers          = N-1
+    #   passengers_previous = N-2
+    #
+    # ------------------------------------------------------------------
+
+    df["passengers_lag1"] = pd.to_numeric(
+        df["passengers"],
+        errors="coerce",
+    )
+
+    df["passengers_lag2"] = pd.to_numeric(
+        df["passengers_previous"],
+        errors="coerce",
+    )
+
+    df["passengers_growth_lag"] = pd.to_numeric(
+        df["passenger_growth_1y"],
+        errors="coerce",
+    )
+
+    df["co2_emissions_lag1"] = pd.to_numeric(
+        df["co2_emissions"],
+        errors="coerce",
+    )
+
+    df["co2_emissions_lag2"] = pd.to_numeric(
+        df["co2_previous"],
+        errors="coerce",
+    )
+
+    df["co2_growth_lag"] = pd.to_numeric(
+        df["co2_growth_1y"],
+        errors="coerce",
+    )
+
+    # L'année du benchmark historique est l'année cible N.
+    df["year"] = pd.to_numeric(
+        df["target_year"],
+        errors="raise",
+    ).astype(int)
+
+    # ------------------------------------------------------------------
+    # Régression historique
+    #
+    # passengers(N) est la cible.
+    # ------------------------------------------------------------------
+
     if target == REG_TARGET:
-        df[REG_TARGET] = df["target_passengers"]
+        if "target_passengers" not in df.columns:
+            raise ValueError(
+                "target_passengers absent du dataset régression."
+            )
+
+        df[REG_TARGET] = pd.to_numeric(
+            df["target_passengers"],
+            errors="coerce",
+        )
+
+    # ------------------------------------------------------------------
+    # Classification historique
+    #
+    # Ancienne définition :
+    #
+    #   en_declin(N) = 1 si passengers(N) < passengers(N-2)
+    #
+    # Le nouveau dataset multi-horizon contient initialement :
+    #
+    #   en_declin = target_passengers < passengers(N-1)
+    #
+    # Cette valeur ne correspond PAS au benchmark historique.
+    # On la reconstruit donc volontairement.
+    # ------------------------------------------------------------------
+
+    elif target == CLF_TARGET:
+        target_passengers = pd.to_numeric(
+            df["target_passengers"],
+            errors="coerce",
+        )
+
+        passengers_n_minus_2 = pd.to_numeric(
+            df["passengers_previous"],
+            errors="coerce",
+        )
+
+        if target_passengers.isna().any():
+            raise ValueError(
+                "Valeurs target_passengers manquantes après reconstruction."
+            )
+
+        if passengers_n_minus_2.isna().any():
+            raise ValueError(
+                "Valeurs passengers(N-2) manquantes dans le benchmark."
+            )
+
+        df[CLF_TARGET] = (
+            target_passengers
+            < passengers_n_minus_2
+        ).astype(int)
+
     return df
 
 
