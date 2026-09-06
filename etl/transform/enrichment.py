@@ -21,6 +21,8 @@ import json
 import logging
 import math
 import os
+import re
+import unicodedata
 from pathlib import Path
 from typing import Iterable
 
@@ -28,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 from .dim_stops import build_dim_stops
-from .distance import compute_route_distance, haversine, lookup_reference_coord, parse_stops_from_itinerary
+from .distance import REFERENCE_COORDS, compute_route_distance, haversine
 from .duration import compute_night_train_durations
 
 logging.basicConfig(level=logging.INFO)
@@ -349,14 +351,45 @@ def _append_facts(df: pd.DataFrame, path: Path, first_write: bool) -> bool:
     return False
 
 
-def _route_distance(route: str, fallback: float) -> float:
-    stops = parse_stops_from_itinerary(route)
+def _normalise_synthetic_stop(value: str) -> str:
+    text = str(value).translate(str.maketrans({
+        'ł': 'l', 'Ł': 'L', 'ø': 'o', 'Ø': 'O',
+        'đ': 'd', 'Đ': 'D', 'ß': 'ss',
+    }))
+    text = unicodedata.normalize('NFKD', text)
+    text = ''.join(char for char in text if not unicodedata.combining(char)).lower()
+    text = re.sub(r'[^a-z0-9\- ]+', ' ', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _lookup_synthetic_coord(stop_name: str) -> tuple[float, float] | None:
+    name = _normalise_synthetic_stop(stop_name)
+    if name in REFERENCE_COORDS:
+        return REFERENCE_COORDS[name]
+    for key, coords in sorted(REFERENCE_COORDS.items(), key=lambda item: len(item[0]), reverse=True):
+        normalised_key = _normalise_synthetic_stop(key)
+        if len(normalised_key) >= 4 and re.search(
+            rf'(?<![a-z0-9]){re.escape(normalised_key)}(?![a-z0-9])', name
+        ):
+            return coords
+    return None
+
+
+def _synthetic_route_stops(route: str) -> list[str]:
+    text = re.sub(r'<br\s*/?>', ' - ', str(route), flags=re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', ' ', text)
+    stops = re.split(r'\s+(?:--|-|\u2013|\u2014|/)\s+', text)
+    return [_normalise_synthetic_stop(stop) for stop in stops if _normalise_synthetic_stop(stop)]
+
+
+def _resolved_route_distance(route: str) -> float | None:
+    stops = _synthetic_route_stops(route)
     if len(stops) >= 2:
-        c1 = lookup_reference_coord(stops[0])
-        c2 = lookup_reference_coord(stops[-1])
+        c1 = _lookup_synthetic_coord(stops[0])
+        c2 = _lookup_synthetic_coord(stops[-1])
         if c1 and c2:
             return max(20.0, float(haversine(c1[0], c1[1], c2[0], c2[1])) * 1.18)
-    return max(20.0, float(fallback))
+    return None
 
 
 def _generic_year_factor(year: int) -> float:
@@ -369,27 +402,7 @@ def _generic_year_factor(year: int) -> float:
     return pre.get(int(year), 1.0)
 
 
-def _traffic_factor_map(traffic: pd.DataFrame) -> dict[tuple[str,int], float]:
-    factors = {}
-    if traffic.empty or not {'country_code','year','traffic'}.issubset(traffic.columns):
-        return factors
-    t = traffic.copy()
-    t['traffic'] = pd.to_numeric(t['traffic'], errors='coerce')
-    t['year'] = pd.to_numeric(t['year'], errors='coerce')
-    t = t.dropna(subset=['traffic','year'])
-    for country, group in t.groupby('country_code'):
-        group = group.sort_values('year')
-        latest = group['traffic'].dropna()
-        if latest.empty or latest.iloc[-1] <= 0:
-            continue
-        base = float(latest.iloc[-1])
-        for _, row in group.iterrows():
-            if row['traffic'] > 0:
-                factors[(str(country), int(row['year']))] = float(np.clip(row['traffic'] / base, 0.25, 1.50))
-    return factors
-
-
-def _calibrate_synthetic_targets(ref: pd.DataFrame, observed_counts: dict[str,int]) -> dict[str,int]:
+def _legacy_synthetic_targets(ref: pd.DataFrame, observed_counts: dict[str,int]) -> dict[str,int]:
     scored = ref.set_index('country_code')
     ratios = []
     for country, count in observed_counts.items():
@@ -415,6 +428,193 @@ def _calibrate_synthetic_targets(ref: pd.DataFrame, observed_counts: dict[str,in
     return targets
 
 
+def _clean_metric(
+    data: pd.DataFrame,
+    value_col: str,
+    metric_col: str | None = None,
+    metric_value: str | None = None,
+) -> pd.DataFrame:
+    required = {'country_code', 'year', value_col}
+    if data.empty or not required.issubset(data.columns):
+        return pd.DataFrame(columns=['country_code', 'year', value_col])
+    cleaned = data.copy()
+    if metric_col and metric_col in cleaned.columns:
+        cleaned = cleaned[cleaned[metric_col].eq(metric_value)]
+    cleaned['country_code'] = cleaned['country_code'].map(_country_code)
+    cleaned['year'] = pd.to_numeric(cleaned['year'], errors='coerce')
+    cleaned[value_col] = pd.to_numeric(cleaned[value_col], errors='coerce')
+    cleaned = cleaned.dropna(subset=['country_code', 'year', value_col])
+    cleaned = cleaned[cleaned['year'].between(min(ANALYSIS_YEARS), max(ANALYSIS_YEARS))]
+    cleaned = cleaned[cleaned[value_col] > 0].copy()
+    cleaned['year'] = cleaned['year'].astype(int)
+    return cleaned.sort_values('year').drop_duplicates(['country_code', 'year'], keep='last')
+
+
+def _robust_recent_value(data: pd.DataFrame, value_col: str) -> float | None:
+    recent = data.loc[data['year'].between(2022, 2024), value_col].dropna()
+    values = recent if not recent.empty else data.sort_values('year')[value_col].dropna().tail(3)
+    return float(values.median()) if not values.empty else None
+
+
+def _observations(data: pd.DataFrame, country: str, value_col: str) -> dict[int, float]:
+    group = data[data['country_code'].eq(country)]
+    return {int(row.year): float(getattr(row, value_col)) for row in group[['year', value_col]].itertuples(index=False)}
+
+
+def _continuous_activity_series(
+    observations: dict[int, float],
+    profile_observations: dict[int, float] | None = None,
+) -> dict[int, float]:
+    """Keep observations, interpolate short gaps, and anchor long gaps."""
+    if not observations:
+        return {}
+    profile_observations = profile_observations or {}
+    official_years = sorted(observations)
+    first_year, last_year = official_years[0], official_years[-1]
+    result: dict[int, float] = {}
+
+    for year in ANALYSIS_YEARS:
+        if year in observations:
+            result[year] = observations[year]
+            continue
+        if year < first_year:
+            result[year] = observations[first_year] * _generic_year_factor(year) / _generic_year_factor(first_year)
+            continue
+        if year > last_year:
+            result[year] = observations[last_year] * _generic_year_factor(year) / _generic_year_factor(last_year)
+            continue
+
+        lower = max(item for item in official_years if item < year)
+        upper = min(item for item in official_years if item > year)
+        missing_years = upper - lower - 1
+        if missing_years <= 2:
+            share = (year - lower) / (upper - lower)
+            result[year] = observations[lower] + share * (observations[upper] - observations[lower])
+            continue
+
+        if all(item in profile_observations for item in (lower, year, upper)):
+            lower_scale = observations[lower] / profile_observations[lower]
+            upper_scale = observations[upper] / profile_observations[upper]
+            share = (year - lower) / (upper - lower)
+            scale = lower_scale + share * (upper_scale - lower_scale)
+            result[year] = profile_observations[year] * scale
+        else:
+            anchor = lower if year - lower <= upper - year else upper
+            result[year] = observations[anchor] * _generic_year_factor(year) / _generic_year_factor(anchor)
+    return result
+
+
+def _allocate_integer_budget(total: int, weights: dict[str, float]) -> dict[str, int]:
+    positive = {code: max(0.0, float(value)) for code, value in weights.items()}
+    weight_sum = sum(positive.values())
+    if total <= 0 or weight_sum <= 0:
+        return {code: 0 for code in positive}
+    quotas = {code: total * value / weight_sum for code, value in positive.items()}
+    allocated = {code: int(math.floor(value)) for code, value in quotas.items()}
+    remainder = total - sum(allocated.values())
+    order = sorted(quotas, key=lambda code: (-(quotas[code] - allocated[code]), code))
+    for code in order[:remainder]:
+        allocated[code] += 1
+    return allocated
+
+
+def _build_synthetic_plan(
+    ref: pd.DataFrame,
+    observed_counts: dict[str, int],
+    traffic: pd.DataFrame,
+    passengers: pd.DataFrame,
+) -> tuple[dict[str, int], dict[tuple[str, int], float], dict[str, str], int]:
+    traffic = _clean_metric(traffic, 'traffic', 'traffic_unit', 'THS_TRKM')
+    passengers = _clean_metric(passengers, 'passengers', 'passenger_metric', 'MIO_PKM')
+    covered_gtfs = {code for code, count in observed_counts.items() if count > 0}
+    ref_indexed = ref.set_index('country_code')
+    eligible = [
+        code for code in ref['country_code']
+        if code not in covered_gtfs and code not in {'CY', 'MT'}
+    ]
+
+    legacy_targets = _legacy_synthetic_targets(ref, observed_counts)
+    nominal_budget = sum(legacy_targets.get(code, 0) for code in eligible)
+    train_anchors = {
+        code: _robust_recent_value(traffic[traffic['country_code'].eq(code)], 'traffic')
+        for code in eligible
+    }
+    passenger_anchors = {
+        code: _robust_recent_value(passengers[passengers['country_code'].eq(code)], 'passengers')
+        for code in eligible
+    }
+
+    paired = [
+        train_anchors[code] / passenger_anchors[code]
+        for code in eligible
+        if train_anchors[code] is not None and passenger_anchors[code] not in (None, 0)
+    ]
+    passenger_scale = float(np.median(paired)) if paired else 1.0
+    network_rates = [
+        train_anchors[code] / float(ref_indexed.loc[code, 'rail_network_km'])
+        for code in eligible
+        if train_anchors[code] is not None and float(ref_indexed.loc[code, 'rail_network_km']) > 0
+    ]
+    network_scale = float(np.median(network_rates)) if network_rates else 1.0
+    score_rates = [
+        train_anchors[code] / float(ref_indexed.loc[code, 'rail_score'])
+        for code in eligible
+        if train_anchors[code] is not None and float(ref_indexed.loc[code, 'rail_score']) > 0
+    ]
+    score_scale = float(np.median(score_rates)) if score_rates else 1.0
+
+    weights: dict[str, float] = {}
+    sources: dict[str, str] = {}
+    anchors: dict[str, float] = {}
+    for code in eligible:
+        network = float(ref_indexed.loc[code, 'rail_network_km'])
+        score = float(ref_indexed.loc[code, 'rail_score'])
+        if train_anchors[code] is not None:
+            source, anchor, weight = 'train_km', train_anchors[code], train_anchors[code]
+        elif passenger_anchors[code] is not None:
+            source, anchor = 'passenger_km', passenger_anchors[code]
+            weight = anchor * passenger_scale
+        elif network > 0:
+            source, anchor, weight = 'rail_network_km', network, network * network_scale
+        else:
+            source, anchor, weight = 'rail_score', score, score * score_scale
+        sources[code], anchors[code], weights[code] = source, float(anchor), float(weight)
+
+    allocated = _allocate_integer_budget(nominal_budget, weights)
+    targets = {code: 0 for code in ref['country_code']}
+    targets.update(allocated)
+    factors: dict[tuple[str, int], float] = {}
+    for code in eligible:
+        if sources[code] == 'train_km':
+            series = _continuous_activity_series(
+                _observations(traffic, code, 'traffic'),
+                _observations(passengers, code, 'passengers'),
+            )
+        elif sources[code] == 'passenger_km':
+            series = _continuous_activity_series(_observations(passengers, code, 'passengers'))
+        else:
+            series = {year: anchors[code] * _generic_year_factor(year) for year in ANALYSIS_YEARS}
+        for year in ANALYSIS_YEARS:
+            factors[(code, year)] = max(0.0, float(series[year] / anchors[code]))
+    return targets, factors, sources, nominal_budget
+
+
+def _calibrate_synthetic_targets(
+    ref: pd.DataFrame,
+    observed_counts: dict[str, int],
+    traffic: pd.DataFrame | None = None,
+    passengers: pd.DataFrame | None = None,
+) -> dict[str, int]:
+    if traffic is None and passengers is None:
+        return _legacy_synthetic_targets(ref, observed_counts)
+    targets, _, _, _ = _build_synthetic_plan(
+        ref, observed_counts,
+        traffic if traffic is not None else pd.DataFrame(),
+        passengers if passengers is not None else pd.DataFrame(),
+    )
+    return targets
+
+
 def _night_ratio(row: pd.Series) -> float:
     if float(row['rail_network_km']) <= 0:
         return 0.0
@@ -424,19 +624,56 @@ def _night_ratio(row: pd.Series) -> float:
     return float(np.clip(0.03 + 0.12 * index, 0.02, 0.16))
 
 
+def _synthetic_route_distances(day_routes: list[str], night_routes: list[str]) -> dict[tuple[bool, str], float]:
+    resolved: dict[tuple[bool, str], float] = {}
+    for is_night, routes in [(False, day_routes), (True, night_routes)]:
+        for route in routes:
+            distance = _resolved_route_distance(route)
+            if distance is not None:
+                resolved[(is_night, route)] = distance
+
+    day_values = [value for (is_night, _), value in resolved.items() if not is_night]
+    all_values = list(resolved.values())
+    medians = {
+        False: float(np.median(day_values)) if day_values else None,
+        True: float(np.median([
+            value for (is_night, _), value in resolved.items() if is_night
+        ])) if any(is_night for is_night, _ in resolved) else None,
+    }
+    all_median = float(np.median(all_values)) if all_values else None
+
+    distances: dict[tuple[bool, str], float] = {}
+    for is_night, routes in [(False, day_routes), (True, night_routes)]:
+        for route in routes:
+            distance = resolved.get((is_night, route))
+            if distance is None:
+                if medians[is_night] is not None:
+                    distance = medians[is_night]
+                elif is_night and medians[False] is not None:
+                    # A night template is expected to cover a longer itinerary.
+                    distance = 1.5 * medians[False]
+                elif all_median is not None:
+                    distance = all_median
+                else:
+                    distance = 180.0 if is_night else 120.0
+            lower_bound = 120.0 if is_night else 35.0
+            distances[(is_night, route)] = float(np.clip(distance, lower_bound, 1200.0))
+    return distances
+
+
 def _generate_synthetic_chunk(
     country: str,
     year: int,
     n: int,
     night_ratio: float,
     operator: str,
-    route_fallback_distance: float,
     bot_night_routes: list[str] | None = None,
 ) -> pd.DataFrame:
     if n <= 0:
         return pd.DataFrame()
     day_routes = DAY_ROUTES.get(country, [f"{country} National Rail Service"])
     night_routes = bot_night_routes or NIGHT_ROUTES.get(country, day_routes)
+    route_distances = _synthetic_route_distances(day_routes, night_routes)
     n_night = int(round(n * night_ratio))
     n_day = n - n_night
 
@@ -444,8 +681,7 @@ def _generate_synthetic_chunk(
     if n_day:
         idx = np.arange(n_day)
         routes = np.asarray(day_routes, dtype=object)[idx % len(day_routes)]
-        distance_map = {r:_route_distance(r, route_fallback_distance) for r in set(routes)}
-        distances = np.array([distance_map[r] for r in routes], dtype=float)
+        distances = np.array([route_distances[(False, r)] for r in routes], dtype=float)
         frames.append(pd.DataFrame({
             'route_id':[f"SYN-{country}-{year}-D-{i+1}" for i in idx],
             'train':routes,
@@ -461,8 +697,7 @@ def _generate_synthetic_chunk(
     if n_night:
         idx = np.arange(n_night)
         routes = np.asarray(night_routes, dtype=object)[idx % len(night_routes)]
-        distance_map = {r:_route_distance(r, max(route_fallback_distance * 1.5, 120.0)) for r in set(routes)}
-        distances = np.array([distance_map[r] for r in routes], dtype=float)
+        distances = np.array([route_distances[(True, r)] for r in routes], dtype=float)
         frames.append(pd.DataFrame({
             'route_id':[f"SYN-{country}-{year}-N-{i+1}" for i in idx],
             'train':routes,
@@ -779,8 +1014,9 @@ def enrich_and_prepare_for_warehouse(processed_dir: str, warehouse_dir: str) -> 
         bot_count = len(prepared)
 
     # 3) Synthétique : uniquement les pays sans GTFS réel.
-    targets = _calibrate_synthetic_targets(ref, observed_counts)
-    traffic_factors = _traffic_factor_map(traffic)
+    targets, activity_factors, weight_sources, nominal_budget = _build_synthetic_plan(
+        ref, observed_counts, traffic, passengers
+    )
     covered_gtfs = {c for c, count in observed_counts.items() if count > 0}
     synthetic_count = 0
     synthetic_country_counts = {}
@@ -794,14 +1030,13 @@ def enrich_and_prepare_for_warehouse(processed_dir: str, warehouse_dir: str) -> 
         base_target = targets.get(country, 0)
         ratio = _night_ratio(row)
         operator = OPERATOR_BY_COUNTRY.get(country, f"National Railway of {country}")
-        fallback = fallback_distance.get(country, 120.0)
         total_country = 0
         for year in ANALYSIS_YEARS:
-            factor = traffic_factors.get((country, year), _generic_year_factor(year))
+            factor = activity_factors.get((country, year), _generic_year_factor(year))
             n = int(round(base_target * factor))
             n = min(n, SYNTHETIC_MAX_PER_COUNTRY_YEAR)
             synthetic = _generate_synthetic_chunk(
-                country, year, n, ratio, operator, fallback, bot_night_routes.get(country)
+                country, year, n, ratio, operator, bot_night_routes.get(country)
             )
             if synthetic.empty:
                 continue
@@ -864,7 +1099,8 @@ def enrich_and_prepare_for_warehouse(processed_dir: str, warehouse_dir: str) -> 
             'Traitement stop_times par chunks',
             'Jour/nuit déterminé par horaires réels GTFS',
             'Champ canonique train + booléen is_night',
-            'Synthétique conservé et calibré sur les volumes GTFS observés',
+            'Synthétique réparti par train-km, passenger-km, réseau puis rail_score',
+            'Séries synthétiques continues avec observations officielles préservées',
             'Aucune promotion artificielle des trains GTFS réels en train de nuit',
             'Traçabilité réel/synthétique avec is_synthetic et data_source',
             'Statistiques pays complétées 2010-2024 par référentiel quand Eurostat manque',
@@ -890,6 +1126,8 @@ def enrich_and_prepare_for_warehouse(processed_dir: str, warehouse_dir: str) -> 
             'country_stats_records':int(len(facts_country_stats)),
             'source_counts':source_counts,
             'synthetic_by_country':synthetic_country_counts,
+            'synthetic_weight_sources':weight_sources,
+            'synthetic_nominal_budget_2024':int(nominal_budget),
             'gtfs_observed_counts':observed_counts,
             'synthetic_density_factor':SYNTHETIC_DENSITY_FACTOR,
             'synthetic_max_per_country_year':SYNTHETIC_MAX_PER_COUNTRY_YEAR,

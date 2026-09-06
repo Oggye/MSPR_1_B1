@@ -3,9 +3,15 @@ import pandas as pd
 from transform.enrichment import (
     ANALYSIS_YEARS,
     SYNTHETIC_CALIBRATION_CAP,
+    _build_synthetic_plan,
     _calibrate_synthetic_targets,
     _complete_country_stats,
+    _continuous_activity_series,
+    _generate_synthetic_chunk,
+    _lookup_synthetic_coord,
+    _normalise_synthetic_stop,
     _prepare_fact_chunk,
+    _synthetic_route_distances,
     load_country_reference,
 )
 from transform.eurostat import _quarterly_to_annual
@@ -63,6 +69,78 @@ def test_synthetic_calibration_is_bounded_when_gtfs_coverage_shrinks():
     expected_upper_bound = round(SYNTHETIC_CALIBRATION_CAP * score * 0.20)
 
     assert targets["DE"] <= expected_upper_bound
+
+
+def test_synthetic_plan_uses_official_hierarchy_and_keeps_structural_zeros():
+    reference = pd.DataFrame([
+        {"country_code": "GT", "rail_network_km": 100, "rail_score": 1.0},
+        {"country_code": "TR", "rail_network_km": 100, "rail_score": 1.0},
+        {"country_code": "PK", "rail_network_km": 200, "rail_score": 0.8},
+        {"country_code": "NW", "rail_network_km": 300, "rail_score": 0.6},
+        {"country_code": "SC", "rail_network_km": 0, "rail_score": 0.4},
+        {"country_code": "CY", "rail_network_km": 0, "rail_score": 0.2},
+        {"country_code": "MT", "rail_network_km": 0, "rail_score": 0.2},
+    ])
+    traffic = pd.DataFrame([
+        {"country_code": "TR", "year": 2024, "traffic": 1000, "traffic_unit": "THS_TRKM"},
+    ])
+    passengers = pd.DataFrame([
+        {"country_code": "TR", "year": 2024, "passengers": 10, "passenger_metric": "MIO_PKM"},
+        {"country_code": "PK", "year": 2024, "passengers": 20, "passenger_metric": "MIO_PKM"},
+    ])
+
+    targets, factors, sources, budget = _build_synthetic_plan(
+        reference, {"GT": 1000}, traffic, passengers
+    )
+
+    assert sources == {
+        "TR": "train_km", "PK": "passenger_km",
+        "NW": "rail_network_km", "SC": "rail_score",
+    }
+    assert targets["GT"] == targets["CY"] == targets["MT"] == 0
+    assert sum(targets.values()) == budget
+    assert min(targets.values()) >= 0
+    assert all(factors[(country, 2024)] >= 0 for country in sources)
+
+
+def test_activity_series_interpolates_only_short_gaps_and_preserves_covid():
+    short = _continuous_activity_series({2017: 100.0, 2019: 120.0})
+    assert short[2018] == 110.0
+
+    profile = {year: 100.0 for year in ANALYSIS_YEARS}
+    profile[2020] = 40.0
+    long_gap = _continuous_activity_series({2013: 100.0, 2023: 100.0}, profile)
+    assert long_gap[2020] == 40.0
+    assert long_gap[2020] != 100.0
+
+    observed_covid = _continuous_activity_series({
+        2019: 100.0, 2020: 55.0, 2021: 60.0, 2022: 80.0, 2023: 95.0,
+    })
+    assert [observed_covid[year] for year in (2020, 2021, 2022)] == [55.0, 60.0, 80.0]
+
+
+def test_synthetic_distances_are_bounded_and_name_matching_is_safe():
+    assert _normalise_synthetic_stop("Wrocław") == "wroclaw"
+    assert _lookup_synthetic_coord("Wrocław") is not None
+    assert _lookup_synthetic_coord("Hel") is None
+
+    distances = _synthetic_route_distances(
+        ["London - Manchester", "London - Birmingham"],
+        ["London - Edinburgh", "London - Aberdeen"],
+    )
+    assert distances[(False, "London - Birmingham")] < 1200
+    assert distances[(True, "London - Aberdeen")] < 1200
+    assert all(0 < distance <= 1200 for distance in distances.values())
+
+
+def test_generated_synthetic_chunk_keeps_provenance_and_day_majority():
+    generated = _generate_synthetic_chunk("FR", 2024, 100, 0.10, "SNCF")
+
+    assert generated["year"].eq(2024).all()
+    assert generated["is_synthetic"].all()
+    assert generated["data_source"].eq("synthetic_reference").all()
+    assert generated["is_night"].sum() < (~generated["is_night"]).sum()
+    assert generated["distance_km"].between(0, 1200, inclusive="right").all()
 
 
 def test_country_stats_apply_official_fallback_order_and_interpolation():
