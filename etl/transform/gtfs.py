@@ -13,7 +13,6 @@ Objectifs :
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -23,8 +22,10 @@ import pandas as pd
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-GTFS_COUNTRIES = ("fr", "ch", "de", "es", "lu")
+GTFS_COUNTRIES = ("fr", "ch", "de", "es", "lu", "at", "be")
 STOP_TIMES_CHUNK_SIZE = 500_000
+MIN_SERVICE_YEAR = 2010
+MAX_SERVICE_YEAR = 2024
 
 # GTFS standard : 2 = rail. Les valeurs 100-117 correspondent aux sous-types
 # ferroviaires de l'extension route_type communément utilisée.
@@ -176,25 +177,26 @@ def _clean_trips(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return df, initial - len(df)
 
 
-def _prepare_calendar(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int], int]:
+def _prepare_calendar(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int], int | None]:
     if df.empty:
-        return df, {}, datetime.now().year
+        return df, {}, None
     df = _normalise_columns(df)
     if "date" not in df.columns:
-        return df, {}, datetime.now().year
+        return df, {}, None
 
     date_text = df["date"].astype("string").str.replace(r"\.0$", "", regex=True).str.strip()
     parsed = pd.to_datetime(date_text, format="%Y%m%d", errors="coerce")
     df["service_year"] = parsed.dt.year
-    years = df["service_year"].dropna().astype(int)
-    default_year = int(years.max()) if not years.empty else datetime.now().year
+    in_period = df["service_year"].between(MIN_SERVICE_YEAR, MAX_SERVICE_YEAR)
+    years = df.loc[in_period, "service_year"].dropna().astype(int)
+    default_year = int(years.max()) if not years.empty else None
 
     service_year_map: dict[str, int] = {}
     if "service_id" in df.columns:
-        valid = df[df["service_id"].notna() & df["service_year"].notna()].copy()
+        valid = df[df["service_id"].notna() & in_period].copy()
         if not valid.empty:
-            valid["service_id"] = valid["service_id"].astype(str)
-            # Le max est retenu pour représenter le snapshot le plus récent du service.
+            valid["service_id"] = _normalise_id(valid["service_id"])
+            # Derniere annee reelle du service dans la periode autorisee.
             service_year_map = valid.groupby("service_id")["service_year"].max().astype(int).to_dict()
     return df, service_year_map, default_year
 
@@ -281,7 +283,14 @@ def transform_gtfs_country(raw_dir: str, processed_dir: str, country: str) -> di
         calendar_df.to_csv(save_dir / "calendar_dates_processed.csv", index=False)
 
     rail_route_ids = set(routes_df.loc[routes_df["is_rail"], "route_id"].astype(str))
-    rail_trip_ids = set(trips_df.loc[trips_df["route_id"].isin(rail_route_ids), "trip_id"].astype(str))
+    rail_trips_in_period = trips_df[trips_df["route_id"].isin(rail_route_ids)].copy()
+    if "service_id" in rail_trips_in_period.columns:
+        rail_trips_in_period = rail_trips_in_period[
+            rail_trips_in_period["service_id"].isin(service_year_map)
+        ]
+    elif default_year is None:
+        rail_trips_in_period = rail_trips_in_period.iloc[0:0]
+    rail_trip_ids = set(rail_trips_in_period["trip_id"].astype(str))
 
     stop_times_out = save_dir / "stop_times_processed.csv"
     if stop_times_out.exists():
@@ -388,12 +397,16 @@ def transform_gtfs_country(raw_dir: str, processed_dir: str, country: str) -> di
     rail_trips["operators"] = rail_trips.get("agency_name", pd.Series(index=rail_trips.index, dtype="object"))
     rail_trips["operators"] = rail_trips["operators"].astype("string").fillna(f"Opérateur {country.upper()}").str.strip()
 
-    # Année de service : service_id -> calendar_dates, sinon année la plus récente du snapshot.
+    # Annee de service prouvee par calendar_dates, bornee a 2010-2024.
     if "service_id" in rail_trips.columns:
-        rail_trips["year"] = rail_trips["service_id"].astype(str).map(service_year_map).fillna(default_year)
+        rail_trips["year"] = rail_trips["service_id"].map(service_year_map)
     else:
         rail_trips["year"] = default_year
-    rail_trips["year"] = pd.to_numeric(rail_trips["year"], errors="coerce").fillna(default_year).astype(int)
+    rail_trips["year"] = pd.to_numeric(rail_trips["year"], errors="coerce")
+    rail_trips = rail_trips[
+        rail_trips["year"].between(MIN_SERVICE_YEAR, MAX_SERVICE_YEAR)
+    ].copy()
+    rail_trips["year"] = rail_trips["year"].astype(int)
 
     rail_trips["train"] = _make_train_label(rail_trips)
     rail_trips["country_code"] = country.upper()

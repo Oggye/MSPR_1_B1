@@ -9,7 +9,10 @@ from pathlib import Path
 import csv
 from datetime import datetime
 
-GTFS_DE_URL = "https://download.gtfs.de/germany/fv_free/latest.zip" 
+GTFS_DE_URL = (
+    "https://archiv.opendata-oepnv.de/DELFI/Soll-Fahrplandaten%20(GTFS)/"
+    "2024/20241209_fahrplaene_gesamtdeutschland_gtfs.zip"
+)
 RAW_DIR = Path("data/raw/gtfs_de")
 KEEP_FILES = [
     "routes.txt",
@@ -23,8 +26,8 @@ KEEP_FILES = [
 def extract_gtfs_de():
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("Téléchargement du GTFS Allemagne (Deutsche Bahn)…")
-    response = requests.get(GTFS_DE_URL)
+    print("Telechargement du GTFS Allemagne DELFI 2024...")
+    response = requests.get(GTFS_DE_URL, timeout=300)
     response.raise_for_status()
 
     with zipfile.ZipFile(io.BytesIO(response.content)) as z:
@@ -51,10 +54,10 @@ def extract_gtfs_de():
     
     # Ajout d'un fichier de métadonnées
     metadata = {
-        "source": "Deutsche Bahn GTFS",
+        "source": "DELFI GTFS 2024 public archive",
         "url": GTFS_DE_URL,
         "date_extraction": datetime.now().isoformat(),
-        "description": "Données complètes des transports ferroviaires allemands (trains de jour)",
+        "description": "Archive publique 2024 du feed national officiel DELFI, multimodale",
         "coverage": "Allemagne entière",
         "format": "GTFS standard"
     }

@@ -48,7 +48,7 @@ def transform_emissions(raw_dir: str, processed_dir: str) -> dict:
     df['country_code'] = df['geo'].map(_geo)
     df['year'] = pd.to_numeric(df['TIME_PERIOD'], errors='coerce')
     df['co2_raw'] = pd.to_numeric(df['OBS_VALUE'], errors='coerce')
-    df = df[df['year'].notna() & (df['year'] >= 2010)].copy()
+    df = df[df['year'].notna() & df['year'].between(2010, 2024)].copy()
     df['year'] = df['year'].astype(int)
     df['country_name'] = df['country_code'].map(COUNTRY_NAMES).fillna(df['country_code'])
     out = Path(processed_dir) / 'emissions'

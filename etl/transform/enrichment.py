@@ -46,11 +46,17 @@ SPECIAL_COUNTRIES = {
     'EU27':'European Union (27)',
 }
 
+
+def _country_code(value) -> str:
+    code = str(value).strip().upper()
+    return {'UK':'GB', 'EL':'GR'}.get(code, code)
+
 # Réglage volontairement paramétrable : le défaut produit déjà une volumétrie
 # importante sans multiplier arbitrairement des dizaines de millions de lignes.
 SYNTHETIC_DENSITY_FACTOR = float(os.getenv('OBRAIL_SYNTHETIC_DENSITY_FACTOR', '0.20'))
 SYNTHETIC_MAX_PER_COUNTRY_YEAR = int(os.getenv('OBRAIL_SYNTHETIC_MAX_PER_COUNTRY_YEAR', '50000'))
 SYNTHETIC_MIN_PER_COUNTRY_YEAR = int(os.getenv('OBRAIL_SYNTHETIC_MIN_PER_COUNTRY_YEAR', '250'))
+SYNTHETIC_CALIBRATION_CAP = float(os.getenv('OBRAIL_SYNTHETIC_CALIBRATION_CAP', '10000'))
 FACT_WRITE_CHUNK = int(os.getenv('OBRAIL_FACT_WRITE_CHUNK', '100000'))
 
 OPERATOR_BY_COUNTRY = {
@@ -141,7 +147,7 @@ def _max_norm(series: pd.Series) -> pd.Series:
 def load_country_reference() -> pd.DataFrame:
     ref = pd.read_csv(COUNTRY_REFERENCE_FILE)
     ref.columns = [str(c).strip() for c in ref.columns]
-    ref['country_code'] = ref['country_code'].astype(str).str.upper().str.strip()
+    ref['country_code'] = ref['country_code'].map(_country_code)
     ref['country_name'] = ref['country_name'].astype(str).str.strip()
     numeric = [c for c in ref.columns if c not in ['country_code','country_name']]
     for col in numeric:
@@ -212,6 +218,17 @@ def _collect_years(path: Path) -> set[int]:
     return years
 
 
+def _count_in_period_rows(path: Path) -> int:
+    count = 0
+    try:
+        for chunk in pd.read_csv(path, usecols=['year'], chunksize=200_000, low_memory=False):
+            years = pd.to_numeric(chunk['year'], errors='coerce')
+            count += int(years.between(min(ANALYSIS_YEARS), max(ANALYSIS_YEARS)).sum())
+    except (ValueError, pd.errors.EmptyDataError):
+        pass
+    return count
+
+
 def _build_dimensions(processed: Path, ref: pd.DataFrame, back: pd.DataFrame):
     observed_codes = set(ref['country_code'])
     years = set(ANALYSIS_YEARS)
@@ -220,13 +237,11 @@ def _build_dimensions(processed: Path, ref: pd.DataFrame, back: pd.DataFrame):
 
     for country, path in _gtfs_service_files(processed):
         observed_codes.add(country)
-        observed_counts[country] = _csv_rows(path)
-        years.update(_collect_years(path))
+        observed_counts[country] = _count_in_period_rows(path)
         operator_names.update(_collect_unique_column(path, 'operators'))
 
     if not back.empty:
-        observed_codes.update(back['country_code'].dropna().astype(str).str.upper())
-        years.update(pd.to_numeric(back['year'], errors='coerce').dropna().astype(int).tolist())
+        observed_codes.update(back['country_code'].dropna().map(_country_code))
         operator_names.update(back['operators'].dropna().astype(str).str.strip())
 
     country_name_map = dict(zip(ref['country_code'], ref['country_name']))
@@ -293,9 +308,11 @@ def _prepare_fact_chunk(
 
     out['route_id'] = out['route_id'].astype('string').fillna('UNKNOWN_ROUTE').str.strip().str.slice(0, 150)
     out['train'] = out['train'].astype('string').fillna('Train').str.strip().str.slice(0, 300)
-    out['country_code'] = out['country_code'].astype('string').str.upper().str.strip().replace({'UK':'GB','EL':'GR'})
+    out['country_code'] = out['country_code'].map(_country_code)
     out['operators'] = _safe_operator(out['operators'], 'Unknown Operator').str.slice(0, 200)
-    out['year'] = pd.to_numeric(out['year'], errors='coerce').fillna(max(ANALYSIS_YEARS)).astype(int)
+    out['year'] = pd.to_numeric(out['year'], errors='coerce')
+    out = out[out['year'].between(min(ANALYSIS_YEARS), max(ANALYSIS_YEARS))].copy()
+    out['year'] = out['year'].astype(int)
     out['is_night'] = _bool_series(out['is_night'], False)
     out['is_synthetic'] = _bool_series(out['is_synthetic'], False)
     out['data_source'] = out['data_source'].astype('string').fillna('unknown').str.slice(0, 80)
@@ -313,10 +330,8 @@ def _prepare_fact_chunk(
     out['duration_min'] = np.maximum(out['duration_min'].to_numpy(dtype=float), minimum_duration)
 
     out['country_id'] = out['country_code'].map(country_ids).fillna(country_ids.get('UNKNOWN', 0)).astype(int)
-    # Si une année GTFS récente n'a pas été détectée lors de la construction de dim_years,
-    # on rattache au maximum disponible plutôt que d'échouer.
-    max_year_id = max(year_ids.values())
-    out['year_id'] = out['year'].map(year_ids).fillna(max_year_id).astype(int)
+    # L'annee a deja ete filtree; aucune valeur hors periode n'est rabattue.
+    out['year_id'] = out['year'].map(year_ids).astype(int)
     out['operator_id'] = out['operators'].map(operator_ids).fillna(0).astype(int)
     out.insert(0, 'fact_id', np.arange(fact_start, fact_start + len(out), dtype=np.int64))
 
@@ -385,9 +400,9 @@ def _calibrate_synthetic_targets(ref: pd.DataFrame, observed_counts: dict[str,in
                 ratios.append(count / score)
     if ratios:
         # médiane : résistante aux écarts de périmètre entre feeds nationaux.
-        calibration = float(np.median(ratios))
+        calibration = min(float(np.median(ratios)), SYNTHETIC_CALIBRATION_CAP)
     else:
-        calibration = 50_000.0
+        calibration = SYNTHETIC_CALIBRATION_CAP
 
     targets = {}
     for _, row in ref.iterrows():
@@ -473,18 +488,60 @@ def _latest_by_country(df: pd.DataFrame, value_col: str) -> dict[str,float]:
     return d.groupby('country_code')[value_col].last().to_dict()
 
 
-def _complete_country_stats(ref: pd.DataFrame, passengers: pd.DataFrame, emissions: pd.DataFrame):
-    p_obs = {}
-    if not passengers.empty:
-        for _, row in passengers.dropna(subset=['country_code','year','passengers']).iterrows():
-            p_obs[(str(row['country_code']), int(row['year']))] = float(row['passengers'])
+def _complete_country_stats(
+    ref: pd.DataFrame,
+    passengers: pd.DataFrame,
+    emissions: pd.DataFrame,
+    unece: pd.DataFrame | None = None,
+    oecd: pd.DataFrame | None = None,
+):
+    p_obs: dict[tuple[str, int], tuple[float, str]] = {}
+
+    def add_passenger_source(frame: pd.DataFrame | None, expected_source: str) -> None:
+        if frame is None or frame.empty or not {'country_code','year','passengers'}.issubset(frame.columns):
+            return
+        data = frame.copy()
+        data['country_code'] = data['country_code'].map(_country_code)
+        data['year'] = pd.to_numeric(data['year'], errors='coerce')
+        data['passengers'] = pd.to_numeric(data['passengers'], errors='coerce')
+        if 'passenger_metric' in data.columns:
+            data = data[data['passenger_metric'].astype('string').str.upper().eq('MIO_PKM')]
+        if 'data_source' in data.columns:
+            data = data[data['data_source'].astype('string').eq(expected_source)]
+        data = data[
+            data['year'].between(min(ANALYSIS_YEARS), max(ANALYSIS_YEARS))
+            & data['passengers'].notna()
+        ]
+        for _, item in data.sort_values('year').iterrows():
+            key = (item['country_code'], int(item['year']))
+            p_obs.setdefault(key, (float(item['passengers']), expected_source))
+
+    # L'ordre des appels constitue la hierarchie explicite de fallback.
+    add_passenger_source(passengers, 'eurostat')
+    add_passenger_source(passengers, 'eurostat_quarterly')
+    add_passenger_source(unece, 'unece')
+    add_passenger_source(oecd, 'oecd_itf')
+
+    interpolated: dict[tuple[str, int], float] = {}
+    for code in ref['country_code']:
+        series = pd.Series(
+            {year: value for (country, year), (value, _) in p_obs.items() if country == code},
+            dtype=float,
+        ).reindex(ANALYSIS_YEARS)
+        filled = series.interpolate(method='linear', limit_area='inside')
+        for year in ANALYSIS_YEARS:
+            if pd.isna(series.loc[year]) and pd.notna(filled.loc[year]):
+                interpolated[(code, year)] = float(filled.loc[year])
+
     e_obs = {}
     if not emissions.empty:
         for _, row in emissions.dropna(subset=['country_code','year','co2_emissions']).iterrows():
             e_obs[(str(row['country_code']), int(row['year']))] = float(row['co2_emissions'])
 
     # Calibrer le référentiel sur l'échelle réellement utilisée par Eurostat.
-    latest_p = _latest_by_country(passengers, 'passengers')
+    latest_p = {}
+    for (code, year), (value, _) in sorted(p_obs.items(), key=lambda item: item[0][1]):
+        latest_p[code] = value
     p_ratios = []
     for _, row in ref.iterrows():
         code = row['country_code']
@@ -507,12 +564,14 @@ def _complete_country_stats(ref: pd.DataFrame, passengers: pd.DataFrame, emissio
         code = row['country_code']
         for year in ANALYSIS_YEARS:
             pk = (code, year)
-            if pk in p_obs:
-                passenger_value, passenger_source = p_obs[pk], 'eurostat'
+            if float(row['rail_network_km']) <= 0 and code in {'CY', 'MT'}:
+                passenger_value, passenger_source = 0.0, 'structural_zero'
+            elif pk in p_obs:
+                passenger_value, passenger_source = p_obs[pk]
+            elif pk in interpolated:
+                passenger_value, passenger_source = interpolated[pk], 'interpolated'
             else:
                 passenger_value = float(row['passengers_reference_million']) * p_scale * _generic_year_factor(year)
-                if float(row['rail_network_km']) <= 0:
-                    passenger_value = 0.0
                 passenger_source = 'synthetic_reference'
 
             if pk in e_obs:
@@ -670,9 +729,13 @@ def enrich_and_prepare_for_warehouse(processed_dir: str, warehouse_dir: str) -> 
     passengers_path = processed / 'eurostat' / 'passengers_processed.csv'
     traffic_path = processed / 'eurostat' / 'traffic_processed.csv'
     emissions_path = processed / 'emissions' / 'co2_emissions_processed.csv'
+    unece_path = processed / 'unece' / 'passengers_processed.csv'
+    oecd_path = processed / 'oecd_itf' / 'passengers_processed.csv'
     passengers = pd.read_csv(passengers_path, low_memory=False) if passengers_path.exists() else pd.DataFrame()
     traffic = pd.read_csv(traffic_path, low_memory=False) if traffic_path.exists() else pd.DataFrame()
     emissions = pd.read_csv(emissions_path, low_memory=False) if emissions_path.exists() else pd.DataFrame()
+    unece = pd.read_csv(unece_path, low_memory=False) if unece_path.exists() else pd.DataFrame()
+    oecd = pd.read_csv(oecd_path, low_memory=False) if oecd_path.exists() else pd.DataFrame()
 
     dim_countries, dim_years, dim_operators, observed_counts = _build_dimensions(processed, ref, back)
     dim_stops = build_dim_stops(str(processed), str(warehouse))
@@ -757,7 +820,7 @@ def enrich_and_prepare_for_warehouse(processed_dir: str, warehouse_dir: str) -> 
         ]).to_csv(facts_path, index=False)
 
     # Statistiques pays : toutes les combinaisons pays/année du référentiel.
-    stats, stats_quality = _complete_country_stats(ref, passengers, emissions)
+    stats, stats_quality = _complete_country_stats(ref, passengers, emissions, unece, oecd)
     stats['country_id'] = stats['country_code'].map(country_ids).astype(int)
     stats['year_id'] = stats['year'].map(year_ids).astype(int)
     stats.insert(0, 'stat_id', range(1, len(stats) + 1))
@@ -806,7 +869,7 @@ def enrich_and_prepare_for_warehouse(processed_dir: str, warehouse_dir: str) -> 
             'Traçabilité réel/synthétique avec is_synthetic et data_source',
             'Statistiques pays complétées 2010-2024 par référentiel quand Eurostat manque',
         ],
-        'data_sources':['back_on_track','eurostat','emissions'] + [f'gtfs_{c.lower()}' for c in sorted(covered_gtfs)],
+        'data_sources':['back_on_track','eurostat','eurostat_quarterly','unece','oecd_itf','emissions'] + [f'gtfs_{c.lower()}' for c in sorted(covered_gtfs)],
         'tables_created':{
             'dimensions':['dim_countries.csv','dim_years.csv','dim_operators.csv','dim_stops.csv'],
             'facts':['facts_night_trains.csv','facts_country_stats.csv'],
@@ -830,6 +893,7 @@ def enrich_and_prepare_for_warehouse(processed_dir: str, warehouse_dir: str) -> 
             'gtfs_observed_counts':observed_counts,
             'synthetic_density_factor':SYNTHETIC_DENSITY_FACTOR,
             'synthetic_max_per_country_year':SYNTHETIC_MAX_PER_COUNTRY_YEAR,
+            'synthetic_calibration_cap':SYNTHETIC_CALIBRATION_CAP,
         }
     }
     with (warehouse / 'warehouse_schema_report.json').open('w', encoding='utf-8') as handle:

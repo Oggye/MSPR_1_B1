@@ -9,8 +9,8 @@ import io
 from pathlib import Path
 
 GTFS_CH_URL = (
-    "https://data.opentransportdata.swiss/dataset/3d2c18f9-9ef1-463f-a249-5c67604efd74/"
-    "resource/598f43d1-484b-4145-9564-ee1c0c32a3d0/download/gtfs_fp2026_20260610.zip"
+    "https://archive.opentransportdata.swiss/timetable_gtfs/"
+    "timetable-2024-gtfs2020/GTFS_FP2024_2024-12-12.zip"
 )
 
 RAW_DIR = Path("data/raw/gtfs_ch")
@@ -27,20 +27,19 @@ KEEP_FILES = {
 def extract_gtfs_ch():
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("📥 Téléchargement du GTFS Suisse...")
-    response = requests.get(GTFS_CH_URL, stream=True)
+    print("Telechargement du GTFS Suisse...")
+    response = requests.get(GTFS_CH_URL, stream=True, timeout=300)
     print(response.status_code)
-    print(response.text[:300])
     response.raise_for_status()
 
-    print("📦 Ouverture de l’archive ZIP...")
+    print("Ouverture de l'archive ZIP...")
     with zipfile.ZipFile(io.BytesIO(response.content)) as zip_file:
         for file_name in zip_file.namelist():
             if file_name in KEEP_FILES:
-                print(f"➡️  Extraction de {file_name}")
+                print(f"Extraction de {file_name}")
                 zip_file.extract(file_name, RAW_DIR)
 
-    print("\n✅ GTFS Suisse extrait avec succès :")
+    print("\nGTFS Suisse extrait avec succes :")
     for file in RAW_DIR.iterdir():
         print(" -", file.name)
 

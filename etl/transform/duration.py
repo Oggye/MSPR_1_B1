@@ -35,6 +35,15 @@ def extract_duration_from_text(text):
         return None
 
 
+def estimate_duration_from_distance(distance_km, speed_kmh=70):
+    """Compatibilite legacy : estime une duree simple en minutes."""
+    distance = pd.to_numeric(distance_km, errors="coerce")
+    speed = pd.to_numeric(speed_kmh, errors="coerce")
+    if pd.isna(distance) or pd.isna(speed) or distance <= 0 or speed <= 0:
+        return 0
+    return round(float(distance) / float(speed) * 60)
+
+
 def commercial_speed(row):
     country = str(row.get("country_code", "")).upper()
     group = COUNTRY_GROUPS.get(country, "C")

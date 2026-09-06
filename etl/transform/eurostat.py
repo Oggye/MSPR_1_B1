@@ -85,7 +85,7 @@ def _wide_to_long(path: Path, value_name: str) -> pd.DataFrame:
     long[value_name] = _extract_numeric(long['raw_value'])
     long['geo'] = long['geo'].map(_geo)
 
-    long = long[long['year'].notna() & (long['year'] >= 2010)].copy()
+    long = long[long['year'].notna() & long['year'].between(2010, 2024)].copy()
     long['year'] = long['year'].astype(int)
     long['country_name'] = long['geo'].map(COUNTRY_NAMES).fillna(long['geo'])
     return long
@@ -194,7 +194,77 @@ def _build_passenger_canonical(detail: pd.DataFrame) -> tuple[pd.DataFrame, str]
     )
     canonical['passenger_metric'] = metric
     canonical = _interpolate_country_series(canonical, 'passengers')
+    canonical['data_source'] = 'eurostat'
     return canonical, metric
+
+
+def _quarterly_to_annual(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    detail_columns = [
+        'country_code', 'year', 'quarter', 'passengers', 'country_name',
+        'passenger_metric', 'data_quality', 'data_source',
+    ]
+    annual_columns = [column for column in detail_columns if column != 'quarter']
+    empty_detail = pd.DataFrame(columns=detail_columns)
+    empty_annual = pd.DataFrame(columns=annual_columns)
+    if not path.exists():
+        logger.warning("Eurostat trimestriel absent : %s", path)
+        return empty_detail, empty_annual
+
+    source = pd.read_csv(path, low_memory=False)
+    source.columns = [str(c).strip() for c in source.columns]
+    if source.empty:
+        return empty_detail, empty_annual
+
+    composite = source.columns[0]
+    dimensions = _dimension_names_from_header(composite)
+    long = pd.melt(source, id_vars=[composite], var_name='period', value_name='raw_value')
+    split = long[composite].astype('string').str.split(',', expand=True)
+    if split.shape[1] != len(dimensions):
+        raise ValueError(f"Structure Eurostat trimestrielle inattendue dans {path.name}")
+    split.columns = dimensions
+    long = pd.concat([long.drop(columns=[composite]), split], axis=1)
+    for col in dimensions:
+        long[col] = long[col].astype('string').str.strip()
+    if not {'freq', 'unit', 'geo'}.issubset(long.columns):
+        raise ValueError(f"Dimensions trimestrielles incompletes dans {path.name}: {dimensions}")
+
+    parsed_period = long['period'].astype('string').str.strip().str.extract(r'^(\d{4})-?Q([1-4])$')
+    long['year'] = pd.to_numeric(parsed_period[0], errors='coerce')
+    long['quarter'] = pd.to_numeric(parsed_period[1], errors='coerce')
+    long['passengers'] = _normalise_pkm(_extract_numeric(long['raw_value']), long['unit'])
+    long['country_code'] = long['geo'].map(_geo)
+    long = long[
+        long['freq'].str.upper().eq('Q')
+        & long['year'].between(2010, 2024)
+        & long['quarter'].between(1, 4)
+        & long['passengers'].notna()
+    ].copy()
+    if long.empty:
+        return empty_detail, empty_annual
+
+    long['year'] = long['year'].astype(int)
+    long['quarter'] = long['quarter'].astype(int)
+    detail = long.groupby(
+        ['country_code', 'year', 'quarter'], as_index=False
+    )['passengers'].median()
+    detail['country_name'] = detail['country_code'].map(COUNTRY_NAMES).fillna(detail['country_code'])
+    detail['passenger_metric'] = 'MIO_PKM'
+    detail['data_quality'] = 'observed_quarter'
+    detail['data_source'] = 'eurostat_quarterly'
+
+    complete_keys = (
+        detail.groupby(['country_code', 'year'], as_index=False)['quarter'].nunique()
+        .query('quarter == 4')[['country_code', 'year']]
+    )
+    annual = (
+        detail.merge(complete_keys, on=['country_code', 'year'], how='inner')
+        .groupby(['country_code', 'year'], as_index=False)['passengers'].sum()
+    )
+    annual['country_name'] = annual['country_code'].map(COUNTRY_NAMES).fillna(annual['country_code'])
+    annual['passenger_metric'] = 'MIO_PKM'
+    annual['data_quality'] = 'derived_four_quarters'
+    annual['data_source'] = 'eurostat_quarterly'
+    return detail, annual
 
 
 def _build_traffic_canonical(detail: pd.DataFrame) -> pd.DataFrame:
@@ -235,6 +305,7 @@ def transform_eurostat(raw_dir: str, processed_dir: str) -> dict:
     out.mkdir(parents=True, exist_ok=True)
 
     passengers_path = raw / 'rail_passengers.csv'
+    quarterly_path = raw / 'rail_passengers_quarterly.csv'
     traffic_path = raw / 'rail_traffic.csv'
     if not passengers_path.exists():
         raise FileNotFoundError(passengers_path)
@@ -248,6 +319,18 @@ def transform_eurostat(raw_dir: str, processed_dir: str) -> dict:
     traffic_detail.to_csv(out / 'traffic_detailed_processed.csv', index=False)
 
     passengers, metric = _build_passenger_canonical(passengers_detail)
+    quarterly_detail, quarterly_annual = _quarterly_to_annual(quarterly_path)
+    quarterly_detail.to_csv(out / 'passengers_quarterly_detailed_processed.csv', index=False)
+    quarterly_annual.to_csv(out / 'passengers_quarterly_annual_processed.csv', index=False)
+    if not quarterly_annual.empty:
+        annual_keys = set(zip(passengers['country_code'], passengers['year']))
+        missing_annual = quarterly_annual[
+            ~quarterly_annual.apply(
+                lambda row: (row['country_code'], row['year']) in annual_keys,
+                axis=1,
+            )
+        ]
+        passengers = pd.concat([passengers, missing_annual], ignore_index=True)
     traffic = _build_traffic_canonical(traffic_detail)
     passengers.to_csv(out / 'passengers_processed.csv', index=False)
     traffic.to_csv(out / 'traffic_processed.csv', index=False)
@@ -257,6 +340,8 @@ def transform_eurostat(raw_dir: str, processed_dir: str) -> dict:
         'passengers_detailed_records':int(len(passengers_detail)),
         'traffic_detailed_records':int(len(traffic_detail)),
         'passengers_records':int(len(passengers)),
+        'passengers_quarterly_records':int(len(quarterly_detail)),
+        'passengers_derived_from_four_quarters':int(len(quarterly_annual)),
         'traffic_records':int(len(traffic)),
         'passenger_metric':metric,
         'countries_passengers':int(passengers['country_code'].nunique()) if not passengers.empty else 0,

@@ -25,6 +25,10 @@ EUROSTAT_FILES = {
         "https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data/"
         "rail_pa_typepas?format=TSV&compressed=true"
     ),
+    "rail_passengers_quarterly": (
+        "https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data/"
+        "rail_pa_quartal?format=TSV&compressed=true"
+    ),
 }
 
 
@@ -53,7 +57,7 @@ def extract_eurostat():
         df = _download_tsv_gzip(name, url)
         out_file = RAW_DIR / f"{name}.csv"
         df.to_csv(out_file, index=False)
-        print(f"{name} extrait et sauvegardé → {out_file}")
+        print(f"{name} extrait et sauvegarde dans {out_file}")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,8 @@ sys.path.insert(0, str(project_root))
 from etl.transform.back_on_track import transform_back_on_track
 from etl.transform.eurostat import transform_eurostat
 from etl.transform.emissions import transform_emissions
+from etl.transform.unece import transform_unece
+from etl.transform.oecd_itf import transform_oecd_itf
 from etl.transform.gtfs import transform_all_gtfs
 from etl.transform.enrichment import enrich_and_prepare_for_warehouse
 
@@ -65,6 +67,8 @@ def main_transform_pipeline():
     stages = [
         ('BACK ON TRACK', lambda: transform_back_on_track(str(raw_dir), str(processed_dir))),
         ('EUROSTAT', lambda: transform_eurostat(str(raw_dir), str(processed_dir))),
+        ('UNECE', lambda: transform_unece(str(raw_dir), str(processed_dir))),
+        ('OECD / ITF', lambda: transform_oecd_itf(str(raw_dir), str(processed_dir))),
         ('ÉMISSIONS CO2', lambda: transform_emissions(str(raw_dir), str(processed_dir))),
     ]
     for title, func in stages:
@@ -72,7 +76,7 @@ def main_transform_pipeline():
         report = func()
         if report: reports.append(_native(report))
 
-    print('\n' + '='*70 + '\nTRANSFORMATION GTFS (FR, CH, DE, ES, LU)\n' + '='*70)
+    print('\n' + '='*70 + '\nTRANSFORMATION GTFS (FR, CH, DE, ES, LU, AT, BE)\n' + '='*70)
     gtfs_reports = transform_all_gtfs(str(raw_dir), str(processed_dir))
     reports.extend(_native(r) for r in gtfs_reports if r)
 
@@ -93,7 +97,7 @@ def main_transform_pipeline():
         json.dump(quality, handle, indent=2, ensure_ascii=False, cls=NumpyEncoder)
 
     print('\n' + '='*70)
-    print('✅ PIPELINE DE TRANSFORMATION TERMINÉ AVEC SUCCÈS')
+    print('[OK] PIPELINE DE TRANSFORMATION TERMINÉ AVEC SUCCÈS')
     print('='*70)
     dq = traceability.get('data_quality', {})
     print(f"Trains total      : {dq.get('total_train_records', 0):,}")

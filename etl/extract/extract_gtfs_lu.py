@@ -14,8 +14,8 @@ from pathlib import Path
 # Cette ressource correspond au GTFS national publié
 # par l'Administration des transports publics.
 GTFS_LU_URL = (
-    "https://data.public.lu/fr/datasets/r/"
-    "e7d8d19a-1bd1-47ae-81fc-070d5745e998"
+    "https://download.data.public.lu/resources/horaires-et-arrets-des-transport-publics-gtfs/"
+    "20240822-080704/gtfs-20240821-20241025.zip"
 )
 
 RAW_DIR = Path("data/raw/gtfs_lu")

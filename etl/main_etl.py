@@ -20,6 +20,10 @@ try:
     from extract.extract_gtfs_de import extract_gtfs_de
     from extract.extract_gtfs_es import extract_gtfs_es
     from extract.extract_gtfs_lu import extract_gtfs_lu
+    from extract.extract_gtfs_at import extract_gtfs_at
+    from extract.extract_gtfs_be import extract_gtfs_be
+    from extract.extract_unece import extract_unece
+    from extract.extract_oecd_itf import extract_oecd_itf
     from extract.extract_emission_co2 import download_eurostat_via_api
 except ImportError as e:
     print(f"⚠️  Modules d'extraction non trouvés: {e}")
@@ -57,8 +61,12 @@ def run_extraction():
         # Nouvelle couverture européenne
         ("GTFS Espagne", extract_gtfs_es),
         ("GTFS Luxembourg", extract_gtfs_lu),
+        ("GTFS Autriche 2024", extract_gtfs_at),
+        ("GTFS Belgique 2024 (archive publique SNCB)", extract_gtfs_be),
 
         ("Eurostat (trafic ferroviaire)", extract_eurostat),
+        ("UNECE (passenger-km ferroviaires)", extract_unece),
+        ("OECD / ITF (passenger-km ferroviaires)", extract_oecd_itf),
         ("Back on Track EU", extract_back_on_track),
         ("Émissions CO2", download_eurostat_via_api),
     ]
