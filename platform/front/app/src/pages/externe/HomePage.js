@@ -266,8 +266,12 @@ export default function ExterneHomePage() {
 
         <article className="ob-home-chart-card">
           <div>
-            <h2>Évolution jour / nuit</h2>
-            <p>Comptages réellement retournés par l'API.</p>
+            <h2>Couverture des trajets par année</h2>
+            <p>
+              Le pic de 2024 reflète surtout une meilleure disponibilité des
+              données GTFS détaillées pour cette année, et non une
+              multiplication réelle du trafic ferroviaire.
+            </p>
           </div>
           <div className="ob-home-chart">
             <Line data={trainChart} options={trainOptions} />

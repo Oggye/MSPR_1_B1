@@ -158,28 +158,22 @@ export default function MapPage() {
   );
 
   const chartData = useMemo(() => {
-    const ordered = [...visibleCountries].sort(
-      (a, b) => b.slice_trains - a.slice_trains,
-    );
+  const ordered = [...visibleCountries].sort(
+    (a, b) => b.slice_trains - a.slice_trains,
+  );
 
-    return {
-      labels: ordered.map(country => country.country_code),
-      datasets: [
-        {
-          label: 'Données réelles',
-          data: ordered.map(country => country.real_trains),
-          backgroundColor: '#1769aa',
-          borderRadius: 4,
-        },
-        {
-          label: 'Données synthétiques',
-          data: ordered.map(country => country.synthetic_trains),
-          backgroundColor: '#f59e0b',
-          borderRadius: 4,
-        },
-      ],
-    };
-  }, [visibleCountries]);
+  return {
+    labels: ordered.map(country => country.country_code),
+    datasets: [
+      {
+        label: 'Trajets',
+        data: ordered.map(country => country.slice_trains),
+        backgroundColor: '#1769aa',
+        borderRadius: 4,
+      },
+    ],
+  };
+}, [visibleCountries]);
 
   const chartOptions = {
     responsive: true,
@@ -362,10 +356,6 @@ export default function MapPage() {
                 const coords = COUNTRY_COORDS[country.country_code];
                 if (!coords) return null;
 
-                const syntheticShare = country.slice_trains > 0
-                  ? country.synthetic_trains / country.slice_trains
-                  : 0;
-
                 return (
                   <CircleMarker
                     key={country.country_code}
@@ -375,8 +365,8 @@ export default function MapPage() {
                       maxCountryCount,
                     )}
                     pathOptions={{
-                      color: syntheticShare > 0.5 ? '#b45309' : '#1769aa',
-                      fillColor: syntheticShare > 0.5 ? '#f59e0b' : '#3b82f6',
+                      color: '#1769aa',
+                      fillColor: '#1769aa',
                       fillOpacity: 0.58,
                       weight: 2,
                     }}
@@ -415,8 +405,8 @@ export default function MapPage() {
         <div className="ob-map-card">
           <div className="ob-map-card__heading">
             <div>
-              <h2>Qualité de couverture</h2>
-              <p>Réel et synthétique par pays dans la tranche.</p>
+              <h2>Répartition des trajets par pays</h2>
+              <p>Nombre total de trajets disponibles par pays dans la tranche.</p>
             </div>
           </div>
           <div className="ob-map-chart">

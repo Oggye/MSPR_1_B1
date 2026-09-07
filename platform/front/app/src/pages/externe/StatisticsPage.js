@@ -117,20 +117,6 @@ export default function StatisticsPage() {
     ],
   };
 
-  const efficiencyData = {
-    labels: trainTypeData.map(item => (
-      item.train_type === 'night' ? 'Nuit' : 'Jour'
-    )),
-    datasets: [
-      {
-        label: "Score d'efficacité du modèle (%)",
-        data: trainTypeData.map(item => item.efficiency_score),
-        backgroundColor: '#22c55e',
-        borderRadius: 6,
-      },
-    ],
-  };
-
   const standardChartOptions = {
     responsive: true,
     maintainAspectRatio: false,
@@ -225,8 +211,12 @@ export default function StatisticsPage() {
       <section className="ob-statistics-grid">
         <article className="ob-statistics-card">
           <div className="ob-statistics-card__heading">
-            <h2>Évolution jour / nuit</h2>
-            <p>Comptage réel des faits par année.</p>
+            <h2>Couverture des trajets par année</h2>
+            <p>
+              Le pic de 2024 reflète surtout une meilleure disponibilité des
+              données GTFS détaillées pour cette année, et non une
+              multiplication réelle du trafic ferroviaire.
+            </p>
           </div>
           <div className="ob-statistics-chart">
             <Line data={trainEvolutionData} options={standardChartOptions} />
@@ -245,24 +235,11 @@ export default function StatisticsPage() {
 
         <article className="ob-statistics-card">
           <div className="ob-statistics-card__heading">
-            <h2>Score d'efficacité</h2>
-            <p>Score calculé par l'API, sans recalcul local.</p>
-          </div>
-          <div className="ob-statistics-chart">
-            <Bar
-              data={efficiencyData}
-              options={{
-                ...standardChartOptions,
-                scales: { y: { beginAtZero: true, max: 100 } },
-              }}
-            />
-          </div>
-        </article>
-
-        <article className="ob-statistics-card">
-          <div className="ob-statistics-card__heading">
-            <h2>Ratio CO₂ / activité</h2>
-            <p>Valeur moyenne associée aux statistiques pays/année.</p>
+            <h2>Ratio CO₂ / activité associé aux pays/années</h2>
+            <p>
+              Valeur moyenne associée aux statistiques pays/année ; ce n'est
+              pas l'émission directe d'un train.
+            </p>
           </div>
           <div className="ob-statistics-comparison-list">
             {trainTypeData.map(item => (
