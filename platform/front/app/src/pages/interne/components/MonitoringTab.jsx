@@ -26,6 +26,37 @@ const formatDate = (value) => {
     : date.toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" });
 };
 
+const modelLabels = {
+  logistic: "Logistic Regression",
+  random_forest: "Random Forest",
+  xgboost: "XGBoost",
+  mlp: "MLP",
+  xgboost_optimized: "XGBoost optimisé",
+  ridge: "Ridge",
+  ridge_optimized: "Ridge optimisé",
+};
+
+const formatModelName = (value) => (
+  modelLabels[value] || value || "N/A"
+);
+
+const getValidationPeriod = (
+  selection,
+  selectedModel,
+) => {
+  const folds = (
+    selection?.[selectedModel]?.folds || []
+  );
+
+  const years = folds
+    .map((fold) => Number(fold.validation_year))
+    .filter(Number.isFinite);
+
+  if (!years.length) return "N/A";
+
+  return `${Math.min(...years)}–${Math.max(...years)}`;
+};
+
 const iaStatusLabels = {
   healthy: "Opérationnel",
   degraded: "Dégradé",
@@ -86,6 +117,39 @@ export default function MonitoringTab({ data }) {
     ? ia.horizons.map((horizon) => `N+${horizon}`).join(" · ")
     : "N/A";
   const regressionUnit = ia.regression?.unit ? ` ${ia.regression.unit}` : "";
+    const classificationSelection =
+    ia.classification?.selection || {};
+
+  const regressionSelection =
+    ia.regression?.selection || {};
+
+  const classificationBenchmark =
+    ia.classification?.benchmark || {};
+
+  const regressionBenchmark =
+    ia.regression?.benchmark || {};
+
+  const classificationSelectionRows =
+    Object.entries(classificationSelection);
+
+  const regressionSelectionRows =
+    Object.entries(regressionSelection);
+
+  const classificationValidationPeriod =
+    getValidationPeriod(
+      classificationSelection,
+      ia.classification?.model,
+    );
+
+  const regressionValidationPeriod =
+    getValidationPeriod(
+      regressionSelection,
+      ia.regression?.model,
+    );
+
+  const finalTestPeriod = ia.final_test_start_year
+    ? `À partir de ${ia.final_test_start_year}`
+    : "N/A";
   const artifacts = [
     ["Manifest", ia.artifacts?.manifest],
     ["Classifier", ia.artifacts?.classifier],
@@ -187,38 +251,394 @@ export default function MonitoringTab({ data }) {
               </dl>
             </section>
 
-            <section className="ia-section">
-              <h3>Performances de validation</h3>
+                        <section className="ia-section">
+              <h3>Modèles déployés et test final</h3>
+
+              <p className="text-block">
+                Les modèles déployés sont choisis par validation
+                temporelle avant d'être évalués sur un jeu de test
+                final séparé.
+              </p>
+
               <div className="two-columns">
                 <div>
                   <h4>Classification</h4>
+
                   <dl className="definition-list">
-                    <dt>Modèle</dt>
-                    <dd>{ia.classification?.model || "N/A"}</dd>
-                    <dt>F1</dt>
-                    <dd>{formatMetric(ia.classification?.overall?.f1)}</dd>
-                    <dt>ROC-AUC</dt>
-                    <dd>{formatMetric(ia.classification?.overall?.roc_auc)}</dd>
-                    <dt>Accuracy</dt>
-                    <dd>{formatMetric(ia.classification?.overall?.accuracy)}</dd>
+                    <dt>Modèle déployé</dt>
+                    <dd>
+                      {formatModelName(
+                        ia.classification?.model
+                      )}
+                    </dd>
+
+                    <dt>Validation de sélection</dt>
+                    <dd>
+                      {classificationValidationPeriod}
+                    </dd>
+
+                    <dt>Critère de sélection</dt>
+                    <dd>F1 moyen en validation temporelle</dd>
+
+                    <dt>Jeu de test final</dt>
+                    <dd>{finalTestPeriod}</dd>
+
+                    <dt>F1 final</dt>
+                    <dd>
+                      {formatMetric(
+                        ia.classification?.overall?.f1
+                      )}
+                    </dd>
+
+                    <dt>ROC-AUC final</dt>
+                    <dd>
+                      {formatMetric(
+                        ia.classification?.overall?.roc_auc
+                      )}
+                    </dd>
+
+                    <dt>Accuracy finale</dt>
+                    <dd>
+                      {formatMetric(
+                        ia.classification?.overall?.accuracy
+                      )}
+                    </dd>
                   </dl>
                 </div>
+
                 <div>
                   <h4>Régression</h4>
+
                   <dl className="definition-list">
-                    <dt>Modèle</dt>
-                    <dd>{ia.regression?.model || "N/A"}</dd>
-                    <dt>MAE</dt>
-                    <dd>{formatMetric(ia.regression?.overall?.mae, 2)}{regressionUnit}</dd>
-                    <dt>RMSE</dt>
-                    <dd>{formatMetric(ia.regression?.overall?.rmse, 2)}{regressionUnit}</dd>
-                    <dt>R²</dt>
-                    <dd>{formatMetric(ia.regression?.overall?.r2)}</dd>
+                    <dt>Modèle déployé</dt>
+                    <dd>
+                      {formatModelName(
+                        ia.regression?.model
+                      )}
+                    </dd>
+
+                    <dt>Validation de sélection</dt>
+                    <dd>
+                      {regressionValidationPeriod}
+                    </dd>
+
+                    <dt>Critère de sélection</dt>
+                    <dd>
+                      MAE pondérée du mélange modèle / baseline
+                    </dd>
+
                     <dt>Baseline</dt>
-                    <dd>{ia.regression?.baseline || "N/A"}</dd>
+                    <dd>
+                      {ia.regression?.baseline || "N/A"}
+                    </dd>
+
+                    <dt>Jeu de test final</dt>
+                    <dd>{finalTestPeriod}</dd>
+
+                    <dt>MAE finale</dt>
+                    <dd>
+                      {formatMetric(
+                        ia.regression?.overall?.mae,
+                        2,
+                      )}
+                      {regressionUnit}
+                    </dd>
+
+                    <dt>RMSE finale</dt>
+                    <dd>
+                      {formatMetric(
+                        ia.regression?.overall?.rmse,
+                        2,
+                      )}
+                      {regressionUnit}
+                    </dd>
+
+                    <dt>R² final</dt>
+                    <dd>
+                      {formatMetric(
+                        ia.regression?.overall?.r2
+                      )}
+                    </dd>
                   </dl>
                 </div>
               </div>
+            </section>
+                        <section className="ia-section">
+              <h3>Sélection des modèles de production</h3>
+
+              <p className="text-block">
+                Cette comparaison correspond à la validation
+                temporelle utilisée pour choisir les modèles
+                réellement déployés.
+              </p>
+
+              <div className="two-columns">
+                <div>
+                  <h4>Classification</h4>
+
+                  {classificationSelectionRows.length ? (
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Modèle</th>
+                            <th>F1 CV</th>
+                            <th>ROC-AUC CV</th>
+                          </tr>
+                        </thead>
+
+                        <tbody>
+                          {classificationSelectionRows.map(
+                            ([model, result]) => (
+                              <tr key={model}>
+                                <td>
+                                  {model === ia.classification?.model ? (
+                                    <strong>
+                                      {formatModelName(model)}
+                                    </strong>
+                                  ) : (
+                                    formatModelName(model)
+                                  )}
+                                </td>
+
+                                <td>
+                                  {formatMetric(
+                                    result?.cv_mean_f1
+                                  )}
+                                </td>
+
+                                <td>
+                                  {formatMetric(
+                                    result?.cv_mean_roc_auc
+                                  )}
+                                </td>
+                              </tr>
+                            )
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="text-block">
+                      Résultats de sélection indisponibles.
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <h4>Régression</h4>
+
+                  {regressionSelectionRows.length ? (
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Modèle</th>
+                            <th>MAE CV</th>
+                            <th>Baseline</th>
+                            <th>Poids ML</th>
+                          </tr>
+                        </thead>
+
+                        <tbody>
+                          {regressionSelectionRows.map(
+                            ([model, result]) => (
+                              <tr key={model}>
+                                <td>
+                                  {model === ia.regression?.model ? (
+                                    <strong>
+                                      {formatModelName(model)}
+                                    </strong>
+                                  ) : (
+                                    formatModelName(model)
+                                  )}
+                                </td>
+
+                                <td>
+                                  {formatMetric(
+                                    result?.cv_blended_weighted_mae,
+                                    2,
+                                  )}
+                                </td>
+
+                                <td>
+                                  {result?.selected_baseline || "N/A"}
+                                </td>
+
+                                <td>
+                                  {formatMetric(
+                                    result?.blend_weight_ml,
+                                    2,
+                                  )}
+                                </td>
+                              </tr>
+                            )
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="text-block">
+                      Résultats de sélection indisponibles.
+                    </p>
+                  )}
+                </div>
+              </div>
+            </section>
+                        <section className="ia-section">
+              <h3>Benchmark historique N+1</h3>
+
+              <p className="text-block">
+                Ce benchmark compare plusieurs familles de modèles
+                sur le protocole historique N+1. Il sert à comparer
+                les approches et ne détermine pas directement le
+                modèle multi-horizon déployé.
+              </p>
+
+              <div className="two-columns">
+                <div>
+                  <h4>Classification</h4>
+
+                  {classificationBenchmark.available ? (
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Modèle</th>
+                            <th>Accuracy</th>
+                            <th>F1</th>
+                            <th>ROC-AUC</th>
+                          </tr>
+                        </thead>
+
+                        <tbody>
+                          {(classificationBenchmark.rows || []).map(
+                            (row) => (
+                              <tr key={row.model}>
+                                <td>
+                                  {row.model ===
+                                  classificationBenchmark.best_model ? (
+                                    <strong>
+                                      {formatModelName(row.model)}
+                                    </strong>
+                                  ) : (
+                                    formatModelName(row.model)
+                                  )}
+                                </td>
+
+                                <td>
+                                  {formatMetric(row.accuracy)}
+                                </td>
+
+                                <td>
+                                  {formatMetric(row.f1)}
+                                </td>
+
+                                <td>
+                                  {formatMetric(row.roc_auc)}
+                                </td>
+                              </tr>
+                            )
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="text-block">
+                      Rapport classification indisponible.
+                    </p>
+                  )}
+
+                  {classificationBenchmark.best_model && (
+                    <p className="text-block">
+                      Meilleur F1 du benchmark :{" "}
+                      <strong>
+                        {formatModelName(
+                          classificationBenchmark.best_model
+                        )}
+                      </strong>
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <h4>Régression</h4>
+
+                  {regressionBenchmark.available ? (
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Modèle</th>
+                            <th>MAE</th>
+                            <th>RMSE</th>
+                            <th>R²</th>
+                          </tr>
+                        </thead>
+
+                        <tbody>
+                          {(regressionBenchmark.rows || []).map(
+                            (row) => (
+                              <tr key={row.model}>
+                                <td>
+                                  {row.model ===
+                                  regressionBenchmark.best_model ? (
+                                    <strong>
+                                      {formatModelName(row.model)}
+                                    </strong>
+                                  ) : (
+                                    formatModelName(row.model)
+                                  )}
+                                </td>
+
+                                <td>
+                                  {formatMetric(
+                                    row.mae,
+                                    2,
+                                  )}
+                                </td>
+
+                                <td>
+                                  {formatMetric(
+                                    row.rmse,
+                                    2,
+                                  )}
+                                </td>
+
+                                <td>
+                                  {formatMetric(row.r2)}
+                                </td>
+                              </tr>
+                            )
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="text-block">
+                      Rapport régression indisponible.
+                    </p>
+                  )}
+
+                  {regressionBenchmark.best_model && (
+                    <p className="text-block">
+                      Meilleure MAE du benchmark :{" "}
+                      <strong>
+                        {formatModelName(
+                          regressionBenchmark.best_model
+                        )}
+                      </strong>
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <p className="text-block">
+                Le meilleur modèle du benchmark historique peut
+                différer du modèle déployé, car le pipeline de
+                production utilise une sélection temporelle
+                multi-horizon distincte.
+              </p>
             </section>
           </>
         )}

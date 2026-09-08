@@ -1,3 +1,4 @@
+import csv
 import json
 import math
 import os
@@ -21,9 +22,18 @@ router = APIRouter(prefix="/api/internal", tags=["internal"])
 APP_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = APP_DIR.parents[2] if len(APP_DIR.parents) > 2 else Path("/app")
 IA_MODELS_DIR = PROJECT_ROOT / "ia" / "models"
+IA_REPORTS_DIR = PROJECT_ROOT / "ia" / "reports"
+
 IA_MANIFEST = IA_MODELS_DIR / "forecast_manifest.json"
 IA_CLASSIFIER = IA_MODELS_DIR / "forecast_classifier.joblib"
 IA_REGRESSOR = IA_MODELS_DIR / "forecast_regressor.joblib"
+
+IA_CLASSIFICATION_REPORT = (
+    IA_REPORTS_DIR / "comparison_classification.csv"
+)
+IA_REGRESSION_REPORT = (
+    IA_REPORTS_DIR / "comparison_regression.csv"
+)
 
 PROMETHEUS_URLS = [
     os.getenv("PROMETHEUS_URL", "http://prometheus:9090"),
@@ -363,6 +373,98 @@ def _reports_summary():
         ),
     }
 
+def _read_benchmark_csv(path):
+    """
+    Lit un petit rapport CSV IA sans dépendance supplémentaire.
+
+    Les rapports sont générés par le pipeline ML dans ia/reports/.
+    Si le fichier n'existe pas, la supervision continue simplement
+    sans benchmark.
+    """
+    if not path.exists():
+        return []
+
+    try:
+        rows = []
+
+        with path.open(
+            "r",
+            encoding="utf-8",
+            newline="",
+        ) as file:
+            reader = csv.DictReader(file)
+
+            for row in reader:
+                cleaned = {}
+
+                for key, value in row.items():
+                    if value is None:
+                        cleaned[key] = None
+                        continue
+
+                    value = value.strip()
+
+                    if value == "":
+                        cleaned[key] = None
+                        continue
+
+                    if value.lower() == "true":
+                        cleaned[key] = True
+                        continue
+
+                    if value.lower() == "false":
+                        cleaned[key] = False
+                        continue
+
+                    try:
+                        number = float(value)
+
+                        cleaned[key] = (
+                            int(number)
+                            if number.is_integer()
+                            else number
+                        )
+                    except ValueError:
+                        cleaned[key] = value
+
+                rows.append(cleaned)
+
+        return rows
+
+    except (OSError, csv.Error):
+        return []
+
+
+def _benchmark_payload(path, metric, lower_is_better=False):
+    rows = _read_benchmark_csv(path)
+
+    valid_rows = [
+        row
+        for row in rows
+        if isinstance(row.get(metric), (int, float))
+    ]
+
+    best_model = None
+
+    if valid_rows:
+        if lower_is_better:
+            best = min(
+                valid_rows,
+                key=lambda row: row[metric],
+            )
+        else:
+            best = max(
+                valid_rows,
+                key=lambda row: row[metric],
+            )
+
+        best_model = best.get("model")
+
+    return {
+        "available": bool(rows),
+        "best_model": best_model,
+        "rows": rows,
+    }
 
 def _ia_summary():
     artifacts = {
@@ -370,12 +472,14 @@ def _ia_summary():
         "classifier": False,
         "regressor": False,
     }
+
     try:
         artifacts = {
             "manifest": IA_MANIFEST.exists(),
             "classifier": IA_CLASSIFIER.exists(),
             "regressor": IA_REGRESSOR.exists(),
         }
+
         if not artifacts["manifest"]:
             return {
                 "available": False,
@@ -384,43 +488,162 @@ def _ia_summary():
                 "error": "Manifest IA introuvable",
             }
 
-        manifest = json.loads(IA_MANIFEST.read_text(encoding="utf-8"))
-        if not isinstance(manifest, dict):
-            raise ValueError("Le manifest IA doit etre un objet JSON")
+        manifest = json.loads(
+            IA_MANIFEST.read_text(encoding="utf-8")
+        )
 
-        classification = manifest.get("classification", {})
-        regression = manifest.get("regression", {})
-        units = manifest.get("units", {})
-        classification = classification if isinstance(classification, dict) else {}
-        regression = regression if isinstance(regression, dict) else {}
-        units = units if isinstance(units, dict) else {}
-        classification_holdout = classification.get("final_holdout", {})
-        regression_holdout = regression.get("final_holdout", {})
-        classification_holdout = classification_holdout if isinstance(classification_holdout, dict) else {}
-        regression_holdout = regression_holdout if isinstance(regression_holdout, dict) else {}
+        if not isinstance(manifest, dict):
+            raise ValueError(
+                "Le manifest IA doit etre un objet JSON"
+            )
+
+        classification = manifest.get(
+            "classification",
+            {},
+        )
+        regression = manifest.get(
+            "regression",
+            {},
+        )
+        units = manifest.get(
+            "units",
+            {},
+        )
+
+        classification = (
+            classification
+            if isinstance(classification, dict)
+            else {}
+        )
+        regression = (
+            regression
+            if isinstance(regression, dict)
+            else {}
+        )
+        units = (
+            units
+            if isinstance(units, dict)
+            else {}
+        )
+
+        classification_holdout = classification.get(
+            "final_holdout",
+            {},
+        )
+        regression_holdout = regression.get(
+            "final_holdout",
+            {},
+        )
+
+        classification_selection = classification.get(
+            "selection",
+            {},
+        )
+        regression_selection = regression.get(
+            "selection",
+            {},
+        )
+
+        classification_holdout = (
+            classification_holdout
+            if isinstance(classification_holdout, dict)
+            else {}
+        )
+        regression_holdout = (
+            regression_holdout
+            if isinstance(regression_holdout, dict)
+            else {}
+        )
+
+        classification_selection = (
+            classification_selection
+            if isinstance(classification_selection, dict)
+            else {}
+        )
+        regression_selection = (
+            regression_selection
+            if isinstance(regression_selection, dict)
+            else {}
+        )
+
+        classification_benchmark = _benchmark_payload(
+            IA_CLASSIFICATION_REPORT,
+            metric="f1",
+            lower_is_better=False,
+        )
+
+        regression_benchmark = _benchmark_payload(
+            IA_REGRESSION_REPORT,
+            metric="mae",
+            lower_is_better=True,
+        )
 
         return {
             "available": True,
-            "status": "healthy" if all(artifacts.values()) else "degraded",
+            "status": (
+                "healthy"
+                if all(artifacts.values())
+                else "degraded"
+            ),
             "version": manifest.get("version"),
-            "architecture": manifest.get("architecture"),
-            "horizons": manifest.get("forecast_horizons", []),
-            "last_updated": datetime.fromtimestamp(IA_MANIFEST.stat().st_mtime).isoformat(timespec="seconds"),
+            "architecture": manifest.get(
+                "architecture"
+            ),
+            "horizons": manifest.get(
+                "forecast_horizons",
+                [],
+            ),
+            "final_test_start_year": manifest.get(
+                "final_test_target_start_year"
+            ),
+            "last_updated": datetime.fromtimestamp(
+                IA_MANIFEST.stat().st_mtime
+            ).isoformat(timespec="seconds"),
             "artifacts": artifacts,
+
             "classification": {
-                "model": classification.get("selected_model"),
-                "overall": classification_holdout.get("overall", {}),
-                "by_horizon": classification_holdout.get("by_horizon", {}),
+                "model": classification.get(
+                    "selected_model"
+                ),
+                "selection": classification_selection,
+                "overall": classification_holdout.get(
+                    "overall",
+                    {},
+                ),
+                "by_horizon": classification_holdout.get(
+                    "by_horizon",
+                    {},
+                ),
+                "benchmark": classification_benchmark,
             },
+
             "regression": {
-                "model": regression.get("selected_model"),
-                "baseline": regression.get("selected_baseline"),
+                "model": regression.get(
+                    "selected_model"
+                ),
+                "baseline": regression.get(
+                    "selected_baseline"
+                ),
                 "unit": units.get("passengers"),
-                "overall": regression_holdout.get("overall", {}),
-                "baseline_metrics": regression_holdout.get("baseline_only", {}),
-                "by_horizon": regression_holdout.get("by_horizon", {}),
+                "selection": regression_selection,
+                "overall": regression_holdout.get(
+                    "overall",
+                    {},
+                ),
+                "baseline_metrics": (
+                    regression_holdout.get(
+                        "baseline_only",
+                        {},
+                    )
+                ),
+                "by_horizon": regression_holdout.get(
+                    "by_horizon",
+                    {},
+                ),
+                "benchmark": regression_benchmark,
             },
         }
+
     except Exception:
         return {
             "available": False,
